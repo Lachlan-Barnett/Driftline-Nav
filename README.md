@@ -61,8 +61,13 @@ that map fairly directly onto what would become separate components/hooks.
 - The map is a stylised representation of Queensland, not real map-tile data:
   195 towns are placed by their real latitude/longitude, the state outline
   (coast, Gulf of Carpentaria, and the NT/SA/NSW borders) is hand-traced from
-  real coordinates, and roads are straight lines between towns following the
-  real highway network. Town labels appear by size as you zoom in (up to 64x).
+  real coordinates, and the 228 roads between towns follow their real shape
+  (see `roads.json`). Town labels appear by size as you zoom in (up to 300x).
+- `src/data/roads.json` holds the real driving route of every road as
+  `[lat, lon]` points (one road per line), taken from OpenStreetMap via the
+  public OSRM router and simplified to ~30 m. Road lengths and drive times come
+  from these shapes. The local roads to the extra places are still straight
+  lines.
 - `src/data/places.json` holds ~4,000 extra places (towns, villages, hamlets,
   suburbs and rural localities) from OpenStreetMap (© OpenStreetMap contributors, ODbL). Each is linked to its
   nearest neighbour by a local road (a minimum spanning tree grown outward

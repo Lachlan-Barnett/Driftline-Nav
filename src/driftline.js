@@ -1,8 +1,10 @@
 // Real-world data pulled from OpenStreetMap (© OpenStreetMap contributors, ODbL):
 //  - places.json: extra named towns/villages/hamlets, [name, lat, lon, rank]
 //  - speeds.json: signed speed limit per road, keyed "TownA|TownB"
+//  - roads.json: the real driving route of each road as [lat, lon] points, same keys
 import PLACE_DATA from './data/places.json';
 import SPEED_LIMITS from './data/speeds.json';
+import ROAD_SHAPES from './data/roads.json';
 
 export function initDriftline() {
   let rafId = null;
@@ -156,10 +158,40 @@ export function initDriftline() {
 
   /* ============== ROADS (edges) ============== */
   const edges = [];
+  // Every edge carries its polyline (pts, world coordinates), cumulative lengths (cum), total real
+  // road length (len, world units) and a bounding box for culling. Roads with no known shape
+  // (and the local access roads) are straight lines between their two ends.
+  function finishEdge(e, pts){
+    const cum=[0]; let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    pts.forEach((p,i)=>{
+      if(i>0) cum.push(cum[i-1]+Math.hypot(p.x-pts[i-1].x, p.y-pts[i-1].y));
+      if(p.x<x0)x0=p.x; if(p.x>x1)x1=p.x; if(p.y<y0)y0=p.y; if(p.y>y1)y1=p.y;
+    });
+    e.pts=pts; e.cum=cum; e.len=cum[cum.length-1]; e.bbox={x0,y0,x1,y1};
+    return e;
+  }
   function road(a,b,type,name){
     const A=nodes[NID[a]], B=nodes[NID[b]];
-    const len = Math.hypot(A.x-B.x, A.y-B.y);
-    edges.push({a:A.id,b:B.id,type,name,len,limit:SPEED_LIMITS[a+'|'+b]});
+    const shape=ROAD_SHAPES[a+'|'+b];
+    let pts = shape && shape.length>1 ? shape.map(([lat,lon])=>proj(lat,lon)) : [A,B];
+    pts[0]={x:A.x,y:A.y}; pts[pts.length-1]={x:B.x,y:B.y}; // pin the ends to the town dots
+    edges.push(finishEdge({a:A.id,b:B.id,type,name,limit:SPEED_LIMITS[a+'|'+b]}, pts));
+  }
+  // position + heading a distance d (world units) along an edge, travelling forward (a->b) or not
+  function pointAlong(e, forward, d){
+    const L=e.len, t = forward ? Math.max(0,Math.min(L,d)) : L-Math.max(0,Math.min(L,d));
+    const cum=e.cum, pts=e.pts;
+    let lo=1, hi=cum.length-1;
+    while(lo<hi){ const mid=(lo+hi)>>1; if(cum[mid]<t) lo=mid+1; else hi=mid; }
+    const A=pts[lo-1], B=pts[lo], seg=cum[lo]-cum[lo-1], u = seg>0 ? (t-cum[lo-1])/seg : 0;
+    let heading=Math.atan2(B.y-A.y,B.x-A.x); if(!forward) heading+=Math.PI;
+    return { x:A.x+(B.x-A.x)*u, y:A.y+(B.y-A.y)*u, heading };
+  }
+  // bearing of the first (or last) few km of an edge as driven, used for left/right turn calls
+  function edgeBearing(e, forward, atEnd){
+    const L=e.len, span=Math.min(L,3);
+    const p=pointAlong(e,forward, atEnd ? L-span : 0), q=pointAlong(e,forward, atEnd ? L : span);
+    return Math.atan2(q.y-p.y,q.x-p.x);
   }
   // Bruce Highway spine
   road("Innisfail","Tully","highway","Bruce Highway");
@@ -186,7 +218,7 @@ export function initDriftline() {
   road("Rockhampton","Mount Morgan","rural","Burnett Highway");
   road("Mount Morgan","Biloela","rural","Burnett Highway");
   road("Biloela","Monto","rural","Burnett Highway");
-  road("Gayndah","Kingaroy","rural","Burnett Highway");
+  road("Gayndah","Murgon","rural","Burnett Highway");
   road("Kingaroy","Dalby","rural","Bunya Highway");
   road("Theodore","Taroom","rural","Leichhardt Highway");
   road("Taroom","Wandoan","rural","Leichhardt Highway");
@@ -226,7 +258,7 @@ export function initDriftline() {
   road("Boulia","Bedourie","outback","Diamantina Developmental Road");
   road("Bedourie","Birdsville","outback","Birdsville Developmental Road");
   road("Windorah","Jundah","outback","Jundah–Windorah Road");
-  road("Windorah","Quilpie","outback","Windorah–Quilpie Road");
+  road("Windorah","Eromanga","outback","Windorah–Eromanga Road");
   road("Bowen","Collinsville","rural","Bowen Developmental Road");
   // Matilda / Landsborough (central west)
   road("Kynuna","Winton","outback","Landsborough Highway");
@@ -255,7 +287,7 @@ export function initDriftline() {
   road("Ipswich","Brisbane","highway","Ipswich Motorway");
   // Far south west
   road("Quilpie","Eromanga","outback","Adventure Way");
-  road("Eromanga","Thargomindah","outback","Adventure Way");
+  road("Quilpie","Thargomindah","outback","Adventure Way");
   road("Cunnamulla","Bollon","rural","Balonne Highway");
   road("Bollon","St George","rural","Balonne Highway");
   road("St George","Dirranbandi","rural","Balonne Highway");
@@ -397,7 +429,7 @@ export function initDriftline() {
   road("Lowood","Esk","rural","Brisbane Valley Highway");
   road("Esk","Toogoolawah","rural","Brisbane Valley Highway");
   road("Toogoolawah","Yarraman","rural","Brisbane Valley Highway");
-  road("Longreach","Isisford","outback","Isisford Road");
+  road("Ilfracombe","Isisford","outback","Isisford Road");
   road("Isisford","Blackall","outback","Isisford Road");
   road("Gin Gin","Mount Perry","rural","Mount Perry Road");
   road("Mount Perry","Gayndah","rural","Mount Perry Road");
@@ -451,11 +483,22 @@ export function initDriftline() {
   const LAND = [MAINLAND_LL, ...ISLANDS_LL].map(poly=> poly.map(([lat,lon])=>proj(lat,lon)));
 
   /* ============== EXTRA PLACES (searchable/tappable, not part of the road network) ============== */
-  // rank 3-4 = town, 5 = village, 6 = hamlet, 7 = suburb, 8 = rural locality. Picking one wires it into the road graph on demand
-  // (see ensurePlaceNode), so the routing algorithms only ever see the towns plus places you visit.
-  const places = PLACE_DATA.map(([name,lat,lon,rank])=>{
+  // Every row of places.json is [name, lat, lon, kind]. The kind picks the row below: how it is
+  // described in search, and its rank, which sets how deep you have to zoom before its name shows
+  // (see LABEL_MIN_SCALE). Picking a place wires it into the road graph on demand (see
+  // ensurePlaceNode), so the routing algorithms only ever see the towns plus places you visit.
+  const PLACE_KINDS = {
+    city:     { label:'City',     rank:3 },
+    town:     { label:'Town',     rank:4 },
+    village:  { label:'Village',  rank:5 },
+    hamlet:   { label:'Hamlet',   rank:6 },
+    suburb:   { label:'Suburb',   rank:7 },
+    locality: { label:'Locality', rank:8 },
+  };
+  const places = PLACE_DATA.map(([name,lat,lon,kind])=>{
+    const info = PLACE_KINDS[kind] || PLACE_KINDS.locality;
     const p = proj(lat,lon);
-    return { name, lat, lon, rank, x:p.x, y:p.y, nodeId:null, link:null };
+    return { name, lat, lon, kind, label:info.label, rank:info.rank, x:p.x, y:p.y, nodeId:null, link:null };
   });
   // Local roads: every place is linked into the network by a minimum spanning tree grown outward
   // from the towns, so each one hangs off its nearest neighbour (a town or another place). The
@@ -630,7 +673,7 @@ export function initDriftline() {
     window.visualViewport.addEventListener('resize', handleViewportChange);
     cleanupFns.push(()=> window.visualViewport.removeEventListener('resize', handleViewportChange));
   }
-  const MIN_SCALE=0.35, MAX_SCALE=64;
+  const MIN_SCALE=0.35, MAX_SCALE=300;
   function clampScale(v){ return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v)); }
   function screenToWorld(sx,sy){ return {x:(sx-offsetX)/scale, y:(sy-offsetY)/scale}; }
   function fitToState(){
@@ -783,9 +826,11 @@ export function initDriftline() {
     return hazards.filter(h=>{
       let minD=Infinity;
       segs.forEach(seg=>{
-        const A=nodes[seg.from], B=nodes[seg.to];
-        const d=pointSegDist(h.x,h.y, A.x,A.y,B.x,B.y);
-        if(d<minD) minD=d;
+        const pts=edges[seg.edgeIdx].pts;
+        for(let k=1;k<pts.length;k++){
+          const d=pointSegDist(h.x,h.y, pts[k-1].x,pts[k-1].y, pts[k].x,pts[k].y);
+          if(d<minD) minD=d;
+        }
       });
       return minD<=ON_ROUTE_THRESHOLD;
     });
@@ -1021,14 +1066,14 @@ export function initDriftline() {
   /* ============== SEARCH ============== */
   const searchInput=document.getElementById('searchInput'), suggestBox=document.getElementById('suggestBox');
   function pinSvg(){ return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 1114 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>'; }
-  const PLACE_KIND = {3:'Town', 4:'Town', 5:'Village', 6:'Hamlet', 7:'Suburb', 8:'Locality'};
   function renderSuggestions(list, q){
     const withDist = list.map(n=>({ n, d: Math.hypot(n.x-car.x,n.y-car.y)*KM_PER_UNIT }));
-    // name-prefix matches first, then nearest first
-    withDist.sort((a,b)=> (q ? (b.n.name.toLowerCase().startsWith(q)-a.n.name.toLowerCase().startsWith(q)) : 0) || a.d-b.d);
+    // exact name first, then name-prefix matches, then nearest first
+    const rankMatch = n=>{ const nm=n.name.toLowerCase(); return nm===q ? 2 : nm.startsWith(q) ? 1 : 0; };
+    withDist.sort((a,b)=> (q ? rankMatch(b.n)-rankMatch(a.n) : 0) || a.d-b.d);
     const shown = withDist.slice(0,40);
     suggestBox.innerHTML=shown.map(({n,d},i)=>{
-      const kind = n.nodeId!==undefined ? PLACE_KIND[n.rank]+' · ' : '';
+      const kind = n.nodeId!==undefined ? n.label+' · ' : '';
       return `<div class="suggestItem" data-i="${i}"><div class="suggestIcon">${pinSvg()}</div>
         <div><div class="suggestName">${n.name}</div><div class="suggestSub">${kind}${Math.round(d)} km away (straight line)</div></div></div>`;
     }).join('');
@@ -1073,7 +1118,7 @@ export function initDriftline() {
       const parent = p.link.kind==='node' ? nodes[p.link.idx] : nodes[places[p.link.idx].nodeId];
       const node={ id:nodes.length, name:p.name, lat:p.lat, lon:p.lon, rank:p.rank, x:p.x, y:p.y, virtual:true };
       nodes.push(node); adj.set(node.id, []);
-      edges.push({ a:parent.id, b:node.id, type:'access', name:'Local roads to '+p.name, len:p.link.len, limit:p.rank===7 ? SPEED.suburb : SPEED.access });
+      edges.push(finishEdge({ a:parent.id, b:node.id, type:'access', name:'Local roads to '+p.name, limit:p.kind==='suburb' ? SPEED.suburb : SPEED.access }, [parent,node]));
       const edgeIdx=edges.length-1;
       adj.get(parent.id).push({to:node.id, edgeIdx}); adj.get(node.id).push({to:parent.id, edgeIdx});
       p.nodeId=node.id;
@@ -1202,7 +1247,6 @@ export function initDriftline() {
     followMode=false;
   }
 
-  function bearingOf(e,forward){ const A=nodes[forward?e.a:e.b], B=nodes[forward?e.b:e.a]; return Math.atan2(B.y-A.y,B.x-A.x); }
   function segForward(seg){ return seg.from===edges[seg.edgeIdx].a; }
   const turnIcons = {
     straight:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V4M6 10l6-6 6 6"/></svg>',
@@ -1217,7 +1261,7 @@ export function initDriftline() {
     if(navSegIdx>0){
       const prevSeg=currentPath[navSegIdx-1], prevE=edges[prevSeg.edgeIdx];
       if(prevE.name!==e.name){
-        let diff=bearingOf(e,segForward(seg))-bearingOf(prevE,segForward(prevSeg));
+        let diff=edgeBearing(e,segForward(seg),false)-edgeBearing(prevE,segForward(prevSeg),true);
         while(diff>Math.PI) diff-=2*Math.PI; while(diff<-Math.PI) diff+=2*Math.PI;
         const deg=diff*180/Math.PI;
         if(Math.abs(deg)<25) mainTxt='Continue onto '+e.name;
@@ -1260,9 +1304,9 @@ export function initDriftline() {
         if(idx!==navSegIdx){ navSegIdx=idx; updateTurnBanner(); }
         const segStart=cumLen[idx], segLen=segLens[idx];
         const localT = segLen>0 ? Math.min(1,(target-segStart)/segLen) : 1;
-        const seg=currentPath[idx], A=nodes[seg.from], B=nodes[seg.to];
-        car.x=A.x+(B.x-A.x)*localT; car.y=A.y+(B.y-A.y)*localT;
-        car.heading=Math.atan2(B.y-A.y,B.x-A.x);
+        const seg=currentPath[idx], segEdge=edges[seg.edgeIdx];
+        const pos=pointAlong(segEdge, segForward(seg), localT*segEdge.len);
+        car.x=pos.x; car.y=pos.y; car.heading=pos.heading;
         if(followMode) centerOn(car.x,car.y);
 
         const elapsedTime = cumTime[idx] + (segTimes[idx]*localT);
@@ -1287,6 +1331,9 @@ export function initDriftline() {
 
     ctx.save(); ctx.translate(offsetX,offsetY); ctx.scale(scale,scale);
     const zs = Math.max(1, scale/1.4); // divide world-unit sizes by this so deep zoom doesn't balloon them
+    // viewport in world coordinates, so we only draw what is on screen
+    const vx0=-offsetX/scale-30/scale, vx1=(W-offsetX)/scale+30/scale, vy0=-offsetY/scale-30/scale, vy1=(H-offsetY)/scale+30/scale;
+    const inView = p=> p.x>=vx0 && p.x<=vx1 && p.y>=vy0 && p.y<=vy1;
 
     // state landmass (mainland + the larger islands)
     ctx.lineJoin='round';
@@ -1302,8 +1349,8 @@ export function initDriftline() {
     ['access','outback','rural','highway'].forEach(kind=>{
       edges.forEach(e=>{
         if(e.type!==kind) return;
-        const A=nodes[e.a], B=nodes[e.b];
-        ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.lineCap='round';
+        const bb=e.bbox; if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
+        ctx.beginPath(); e.pts.forEach((p,i)=> i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.lineCap='round'; ctx.lineJoin='round';
         if(kind==='access'){
           ctx.lineWidth=1.6/zs; ctx.setLineDash([3/zs,4/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); ctx.stroke(); ctx.setLineDash([]);
         } else if(kind==='outback'){
@@ -1339,8 +1386,11 @@ export function initDriftline() {
     // final route
     if(currentPath && !searchAnim){
       ctx.beginPath();
-      const first=nodes[currentPath[0].from]; ctx.moveTo(first.x,first.y);
-      currentPath.forEach(seg=>{ const n=nodes[seg.to]; ctx.lineTo(n.x,n.y); });
+      let started=false;
+      currentPath.forEach(seg=>{
+        const pts=edges[seg.edgeIdx].pts, fwd=segForward(seg);
+        for(let k=0;k<pts.length;k++){ const p=pts[fwd?k:pts.length-1-k]; if(!started){ ctx.moveTo(p.x,p.y); started=true; } else ctx.lineTo(p.x,p.y); }
+      });
       ctx.lineJoin='round'; ctx.lineCap='round';
       ctx.lineWidth=7/zs; ctx.strokeStyle=styles.getPropertyValue('--route-glow').trim(); ctx.stroke();
       ctx.lineWidth=3.4/zs; ctx.strokeStyle=styles.getPropertyValue('--route').trim();
@@ -1351,9 +1401,6 @@ export function initDriftline() {
     // towns
     const DOT_R = {1:5, 2:4, 3:3, 4:2.5};
     const textCol = styles.getPropertyValue('--text').trim(), routeCol = styles.getPropertyValue('--route').trim();
-    // viewport in world coordinates, so we only draw what is on screen
-    const vx0=-offsetX/scale-30/scale, vx1=(W-offsetX)/scale+30/scale, vy0=-offsetY/scale-30/scale, vy1=(H-offsetY)/scale+30/scale;
-    const inView = p=> p.x>=vx0 && p.x<=vx1 && p.y>=vy0 && p.y<=vy1;
     const isDestNode = n=> currentDestination && currentDestination.id===n.id;
     ctx.beginPath();
     places.forEach(p=>{
