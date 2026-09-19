@@ -1,4 +1,4 @@
-// Loads the app's data files from disk (the app imports them as JSON through Vite; tests read them directly).
+// Loads the app's data files from disk (the app imports them as JSON through the bundler; tests read them directly).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -6,7 +6,7 @@ import { markup } from './markup.js';
  * Driftline mounts as one wrapping component rather than a tree of small
  * components. The original app is a single self-contained script that talks
  * to the DOM directly (getElementById, canvas drawing, localStorage) and was
- * never written against React state — porting it into idiomatic hooks and
+ * never written against component state — porting it into idiomatic hooks and
  * components piece by piece would risk breaking a lot of carefully-tuned
  * behavior (gesture handling, animation timing, panel choreography) for
  * little real benefit here. So the markup is injected as-is and the same

@@ -1,4 +1,4 @@
-// Rebuilds every data file in src/data from OpenStreetMap, in dependency order:
+// Rebuilds every data file in src/data from open map data, in dependency order:
 //
 //   npm run data:all [-- --refresh]
 //

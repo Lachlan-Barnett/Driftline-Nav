@@ -1,5 +1,5 @@
 // Builds src/data/places.json: every named city, town, village, hamlet, suburb and locality in
-// Queensland from OpenStreetMap, minus anything already on the road network or off the coast.
+// Queensland from open map data, minus anything already on the road network or off the coast.
 //
 //   node scripts/fetch-places.mjs [--refresh]
 //
@@ -7,19 +7,19 @@
 // fall on (or within ~1 km of) the coastline polygons in coast.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { cached, overpass, DATA_DIR, writeRows } from './lib/io.mjs';
+import { cached, queryMap, DATA_DIR, writeRows } from './lib/io.mjs';
 import { kmLL, toWorld, pointInRing, distToRing } from './lib/geo.mjs';
 import { proj } from '../src/projection.js';
 import { TOWNS } from '../src/data/network.js';
 
 const KIND = { city: 'city', town: 'town', village: 'village', hamlet: 'hamlet', suburb: 'suburb', neighbourhood: 'suburb', quarter: 'suburb', locality: 'locality' };
 const ORDER = ['city', 'town', 'village', 'hamlet', 'suburb', 'locality'];
-const COAST_SLACK_UNITS = 0.55; // ~1 km: OSM points sit right on the shore
+const COAST_SLACK_UNITS = 0.55; // ~1 km: the points sit right on the shore
 
 console.log('Places');
-const towns = await cached('places-towns.json', () => overpass(
+const towns = await cached('places-towns.json', () => queryMap(
   '[out:json][timeout:150];area["ISO3166-2"="AU-QLD"]->.a;node["place"~"^(city|town|village|hamlet)$"](area.a);out;'));
-const subs = await cached('places-subs.json', () => overpass(
+const subs = await cached('places-subs.json', () => queryMap(
   '[out:json][timeout:170];area["ISO3166-2"="AU-QLD"]->.a;node["place"~"^(suburb|neighbourhood|quarter|locality)$"]["name"](area.a);out;'));
 
 const coastFile = path.join(DATA_DIR, 'coast.json');

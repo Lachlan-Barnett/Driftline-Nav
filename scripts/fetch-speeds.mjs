@@ -2,13 +2,13 @@
 //
 //   node scripts/fetch-speeds.mjs [--refresh]
 //
-// Pulls the named highways from OpenStreetMap with their `maxspeed` tags, matches each way to the
+// Pulls the named highways from the map database with their `maxspeed` tags, matches each way to the
 // nearest road of the same name (by the road's real shape), and takes the most common signed
-// limit by length. Roads OSM has no limit for get Queensland's 100 km/h default, or 80 km/h when
+// limit by length. Roads with no signed limit in the data get Queensland's 100 km/h default, or 80 km/h when
 // they are mostly unsealed. Output: "TownA|TownB": limit, one per line.
 import fs from 'node:fs';
 import path from 'node:path';
-import { cached, overpass, DATA_DIR, writeKeyed } from './lib/io.mjs';
+import { cached, queryMap, DATA_DIR, writeKeyed } from './lib/io.mjs';
 import { kmLL } from './lib/geo.mjs';
 import { TOWNS, ROADS } from '../src/data/network.js';
 
@@ -18,7 +18,7 @@ const MIN_TAGGED_KM = 8, MIN_TAGGED_SHARE = 0.2;
 
 console.log('Speed limits');
 const names = [...new Set(ROADS.map(r => r[3]))].sort();
-const raw = await cached('speed-ways.json', () => overpass(
+const raw = await cached('speed-ways.json', () => queryMap(
   `[out:json][timeout:170];area["ISO3166-2"="AU-QLD"]->.a;way["highway"]["name"~"^(${names.join('|')})"](area.a);out tags geom;`));
 
 const pos = Object.fromEntries(TOWNS.map(([name, lat, lon]) => [name, { lat, lon }]));
@@ -62,11 +62,11 @@ for (const w of raw.elements) {
   if (limit) { best.tagged[limit] = (best.tagged[limit] || 0) + lenKm; best.taggedKm += lenKm; }
 }
 
-const out = []; const src = { osm: 0, unsealed: 0, default: 0 };
+const out = []; const src = { signed: 0, unsealed: 0, default: 0 };
 for (const e of edges) {
   let limit = DEFAULT_LIMIT, from = 'default';
   if (e.taggedKm >= MIN_TAGGED_SHARE * e.totalKm && e.taggedKm > MIN_TAGGED_KM) {
-    limit = +Object.entries(e.tagged).sort((x, y) => y[1] - x[1])[0][0]; from = 'osm';
+    limit = +Object.entries(e.tagged).sort((x, y) => y[1] - x[1])[0][0]; from = 'signed';
   } else if (e.unpavedKm > e.totalKm * 0.5) { limit = UNSEALED_LIMIT; from = 'unsealed'; }
   src[from]++;
   out.push([e.key, String(limit)]);

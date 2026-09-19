@@ -1,6 +1,6 @@
 # Driftline — Queensland Nav
 
-A Waze-style stylised navigation demo for Queensland, Australia. Search and drive between 190+
+A stylised navigation demo for Queensland, Australia. Search and drive between 190+
 towns and 4,000+ suburbs, villages and hamlets, plan **road trips** with several stops, watch seven
 pathfinding algorithms (BFS, DFS, IDS, Dijkstra, A\*, IDA\*, Wave) search the map live as glowing
 neon-green lines, **compare** them side by side, get turn-by-turn directions with **speed limit
@@ -15,14 +15,14 @@ npm install
 npm run dev
 ```
 
-Then open the URL Vite prints (usually `http://localhost:5173`).
+Then open the URL the dev server prints (usually `http://localhost:5173`).
 
 ```bash
 npm run build      # production bundle in dist/
 npm run preview    # serve the built files locally to check them
 npm test           # 33 tests: map logic + the real app in a fake browser
-npm run shots      # real screenshots in headless Chrome/Edge -> tests/.shots/
-npm run data:all   # rebuild every data file from OpenStreetMap (see scripts/README.md)
+npm run shots      # real screenshots in a headless browser -> tests/.shots/
+npm run data:all   # rebuild every data file from open map data (see scripts/README.md)
 ```
 
 ## Using it
@@ -64,7 +64,7 @@ src/
   App.jsx, main.jsx, App.css
   data/
     network.js       the 195 towns and 228 roads (hand-written data, one per line)
-    roads.json       real driving shape of each road         } generated from OpenStreetMap
+    roads.json       real driving shape of each road         } generated from open map data
     speeds.json      signed speed limit of each road         } by scripts/ (npm run data:*)
     coast.json       real coastline: mainland + 140 islands  }
     places.json      ~4,050 suburbs / villages / hamlets…    }
@@ -80,7 +80,7 @@ only ever see the towns plus whatever you've touched, which keeps them fast.
 
 App.jsx renders `markup.js` once and calls `initDriftline()` after mount; that function wires everything
 up with ordinary `getElementById` calls and returns a cleanup function (cancels the animation loop and
-removes the window / document listeners). It was never written against React state, so the interface is
+removes the window / document listeners). It was never written against component state, so the interface is
 one module rather than a tree of components. Splitting it into components is a reasonable next step;
 `driftline.js` is organised in commented sections (PREFERENCES, GRAPH, CANVAS / CAMERA, PAN / ZOOM,
 HAZARDS, REPORT FAB, ADMIN PANEL, THEME, ALGORITHM PANEL, MENU + SETTINGS, FAVOURITES, SEARCH, TRIP STATE,
@@ -92,9 +92,9 @@ separate components or hooks.
 The map is a stylised map of Queensland, not map tiles:
 
 - **Towns** (`network.js`) are placed by real latitude/longitude; **roads** follow their real route
-  (`roads.json`, from OSRM) with their signed speed limit (`speeds.json`, from OpenStreetMap `maxspeed`
-  tags; roads OSM has no limit for use Queensland's 100 km/h default, or 80 if mostly unsealed).
-- The **coastline** (`coast.json`) is the real OpenStreetMap coastline. The NSW / SA / NT borders are
+  (`roads.json`, from a public routing service) with their signed speed limit (`speeds.json`, from the map database's `maxspeed`
+  tags; roads with no signed limit use Queensland's 100 km/h default, or 80 if mostly unsealed).
+- The **coastline** (`coast.json`) is the real coastline (open map data). The NSW / SA / NT borders are
   hand-traced straight-ish lines.
 - **Extra places** (`places.json`) are rows of `[name, lat, lon, kind]` with kind `city`, `town`,
   `village`, `hamlet`, `suburb` or `locality`. Each hangs off its nearest neighbour by a local road
@@ -102,7 +102,7 @@ The map is a stylised map of Queensland, not map tiles:
   picked.
 - Built-up areas slow the road at each end of a town (60 km/h around big towns, 50 around small ones);
   local roads carry 50 km/h in suburbs and 80 km/h elsewhere. These are estimates, not signed limits.
-- All of this is a **one-off snapshot** of OpenStreetMap (© OpenStreetMap contributors, ODbL), taken on
+- All of this is a **one-off snapshot** of open map data (© OpenStreetMap contributors, ODbL: the credit that licence requires, also shown in the map footer), taken on
   19 Sep 2026. Rebuild it with `npm run data:all`. Some roads (mostly the outback ones) and 288 of the
   local roads have no known shape and are straight lines.
 - Drive times are limits and slowdowns only: no stops, no traffic beyond your own reports.

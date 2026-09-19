@@ -1,10 +1,10 @@
-// Takes real screenshots of the running app in headless Chrome/Edge, driving it through the
+// Takes real screenshots of the running app in a headless browser, driving it through the
 // DevTools protocol. Useful for eyeballing layout and the canvas, which the fake-DOM tests can't.
 //
 //   npm run shots                 (desktop + phone sizes, into tests/.shots/)
 //   node tests/visual/shots.mjs --only=drive
 //
-// Needs Chrome or Edge installed. Nothing here is part of the app.
+// Needs a Chromium-based browser installed (set BROWSER_PATH to point at one). Nothing here is part of the app.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -21,16 +21,16 @@ const BROWSERS = [
 ];
 const only = (process.argv.find(a => a.startsWith('--only=')) || '').split('=')[1];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const browserPath = BROWSERS.find(p => fs.existsSync(p));
-if (!browserPath) { console.error('No Chrome/Edge found.'); process.exit(1); }
+const browserPath = process.env.BROWSER_PATH || BROWSERS.find(p => fs.existsSync(p));
+if (!browserPath) { console.error('No supported browser found (set BROWSER_PATH).'); process.exit(1); }
 fs.mkdirSync(OUT, { recursive: true });
 
-const vite = await createServer({ root: ROOT, logLevel: 'silent', server: { port: 5199, strictPort: false } });
-await vite.listen();
-const url = vite.resolvedUrls.local[0];
+const devServer = await createServer({ root: ROOT, logLevel: 'silent', server: { port: 5199, strictPort: false } });
+await devServer.listen();
+const url = devServer.resolvedUrls.local[0];
 
 const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'driftline-shots-'));
-const chrome = spawn(browserPath, ['--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars', '--remote-debugging-port=9333',
+const browser = spawn(browserPath, ['--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars', '--remote-debugging-port=9333',
   `--user-data-dir=${userDir}`, 'about:blank'], { stdio: 'ignore' });
 async function cdpTarget() {
   for (let i = 0; i < 60; i++) { try { const r = await fetch('http://127.0.0.1:9333/json'); const l = await r.json(); const p = l.find(t => t.type === 'page'); if (p) return p; } catch (e) {} await sleep(250); }
@@ -56,7 +56,7 @@ const clickId = id => evalJs(`document.getElementById(${JSON.stringify(id)}).cli
 await send('Page.enable'); await send('Runtime.enable'); await send('Log.enable');
 await send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__DRIFTLINE_DEBUG__ = true; try { localStorage.clear(); } catch (e) {}' });
 
-// the first load can trigger Vite's dependency pre-bundling and a reload, so wait for the app itself
+// the first load can trigger dependency pre-bundling and a reload, so wait for the app itself
 async function waitReady() {
   for (let i = 0; i < 120; i++) {
     const ok = await evalJs("!!(window.__driftline && document.getElementById('searchInput'))").catch(() => false);
@@ -151,8 +151,8 @@ if (!only || 'ctx'.includes(only)) {
 }
 
 ws.close();
-if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(chrome.pid), '/T', '/F']); else chrome.kill();
-await vite.close();
+if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(browser.pid), '/T', '/F']); else browser.kill();
+await devServer.close();
 try { fs.rmSync(userDir, { recursive: true, force: true }); } catch (e) {}
 console.log('Screenshots in tests/.shots/');
 process.exit(0);

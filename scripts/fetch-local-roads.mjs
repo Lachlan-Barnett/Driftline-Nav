@@ -1,21 +1,21 @@
 // Builds src/data/local-roads.json: the local road linking every extra place to the network, with
-// its real shape from OSRM (OpenStreetMap data).
+// its real shape from a public routing service.
 //
 //   node scripts/fetch-local-roads.mjs [--refresh] [--limit=N]
 //
 // Every place hangs off its nearest neighbour (a town, or another place): a minimum spanning tree
-// grown outward from the towns. Then each link is routed with OSRM. This is ~4,000 requests (about
-// 10-15 minutes) and is resumable: progress is saved in scripts/.cache/osrm-local.json.
+// grown outward from the towns. Then each link is routed with the routing service. This is ~4,000 requests (about
+// 10-15 minutes) and is resumable: progress is saved in scripts/.cache/route-local.json.
 // Rows are [placeIndex, placeName, parent, shape]: parent is a town name (string) or another
 // place's index (number); shape is [[lat, lon], ...] or null when no road could be found.
 import fs from 'node:fs';
 import path from 'node:path';
-import { readCache, writeCache, osrmRoute, sleep, DATA_DIR, writeRows, FLAGS } from './lib/io.mjs';
+import { readCache, writeCache, routeBetween, sleep, DATA_DIR, writeRows, FLAGS } from './lib/io.mjs';
 import { simplify, round4, kmLL } from './lib/geo.mjs';
 import { proj } from '../src/projection.js';
 import { TOWNS } from '../src/data/network.js';
 
-const CACHE = 'osrm-local.json';
+const CACHE = 'route-local.json';
 const FETCH_TOL_KM = 0.03, OUTPUT_TOL_KM = 0.08;   // simplify once when fetching, harder when writing
 const CONCURRENCY = 3, DELAY_MS = 220;
 const limitArg = process.argv.find(a => a.startsWith('--limit='));
@@ -52,7 +52,7 @@ let finished = 0, failed = 0, next = 0; const started = Date.now();
 async function worker() {
   while (next < todo.length) {
     const i = todo[next++], p = places[i], q = parentPoint(i);
-    const r = await osrmRoute([q.lon, q.lat], [p.lon, p.lat]);
+    const r = await routeBetween([q.lon, q.lat], [p.lon, p.lat]);
     const straight = kmLL(q.lat, q.lon, p.lat, p.lon);
     if (r.ok && r.dist / 1000 <= straight * 3.5 + 3) {
       done[i] = { ok: true, dist: Math.round(r.dist), coords: simplify(r.coords.map(([lon, lat]) => [lat, lon]), FETCH_TOL_KM).map(round4) };

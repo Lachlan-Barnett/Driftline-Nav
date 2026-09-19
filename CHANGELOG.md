@@ -3,7 +3,7 @@
 Everything that has been added, changed, removed or fixed in Driftline, newest first. Each round is
 one batch of requests; none of this touches git history: commits and branches are managed by hand.
 
-Branches on GitHub: `main` and `node_line_search` carry the neon line search and Wave;
+Branches on the remote: `main` and `node_line_search` carry the neon line search and Wave;
 `node_dot_search` keeps the original dot search (it predates Wave and everything below).
 
 ---
@@ -45,17 +45,17 @@ Branches on GitHub: `main` and `node_line_search` carry the neon line search and
 - **Settings** (hamburger menu): speed limit signs, slower speeds in built-up areas, avoid reports when
   routing, offer reroutes while driving, show suburbs / villages / local roads, animate the search, plus
   *Clear recent destinations* and *Clear favourites*. Saved in the browser.
-- **Real coastline** (`src/data/coast.json`): Queensland's coast and 140 islands from OpenStreetMap,
+- **Real coastline** (`src/data/coast.json`): Queensland's coast and 140 islands from open map data,
   replacing the hand-traced outline. The NSW / SA / NT borders are still hand-traced.
 - **Real shapes for the local roads** (`src/data/local-roads.json`): each suburb / village / hamlet /
   locality is linked to the network by a road that follows the real street layout (3,762 of 4,050 links
   have a real shape; the rest stay straight lines).
 - **`src/graph.js`, `src/algorithms.js`, `src/projection.js`, `src/data/network.js`**: the map logic
   split out of the UI file so it can be tested and reused by scripts (see *Changed*).
-- **Data scripts** (`scripts/`, `npm run data:*`): every data file can be rebuilt from OpenStreetMap.
+- **Data scripts** (`scripts/`, `npm run data:*`): every data file can be rebuilt from open map data.
   See `scripts/README.md`.
 - **Tests** (`tests/`, `npm test`): 11 logic tests and 22 browser-level tests (real app code, fake DOM,
-  virtual clock). `npm run shots` takes real screenshots in headless Chrome/Edge.
+  virtual clock). `npm run shots` takes real screenshots in a headless browser.
 - Test hook: when `window.__DRIFTLINE_DEBUG__` is set before start, the app exposes `window.__driftline`.
 - `.gitignore`: `scripts/.cache`, `scripts/.tmp`, `tests/.shots`.
 - Islands with real towns are now on the map: Palm Island, Thursday Island, Gununa (Mornington Island),
@@ -70,7 +70,7 @@ Branches on GitHub: `main` and `node_line_search` carry the neon line search and
   settings): 1,569 lines → 1,396, with the map logic in the new modules.
 - Towns and roads moved out of `driftline.js` into `src/data/network.js` (rows of data, one per line).
 - `places.json` regenerated against the real coastline (see above) and `speeds.json` rebuilt by
-  `scripts/fetch-speeds.mjs`, which matches OpenStreetMap ways to each road by the road's real shape
+  `scripts/fetch-speeds.mjs`, which matches map-database ways to each road by the road's real shape
   (one limit changed: Tiaro–Gympie 100 → 110).
 - Local roads to places are now precomputed (`local-roads.json`) instead of being computed when the app
   starts: startup no longer builds a spanning tree.
@@ -123,7 +123,7 @@ Branches: `main` = this version; `node_dot_search` = the dot animation, without 
 
 ### Added
 - **Real road shapes** (`src/data/roads.json`): every one of the 228 roads follows its real driving route
-  (from OSRM / OpenStreetMap), simplified to ~30 m. Road lengths, drive times and the driving car all
+  (from a public routing service), simplified to ~30 m. Road lengths, drive times and the driving car all
   follow the real shape. Brisbane → Beaudesert now runs via Jimboomba and Woodhill.
 - `places.json` has a readable **kind** column (`city`, `town`, `village`, `hamlet`, `suburb`,
   `locality`) instead of a numeric rank.
@@ -142,7 +142,7 @@ Branches: `main` = this version; `node_dot_search` = the dot animation, without 
 ## Round 5: suburbs, localities and local roads
 
 ### Added
-- **Suburbs and rural localities** from OpenStreetMap (891 + 2,232), taking `places.json` to ~4,000.
+- **Suburbs and rural localities** from open map data (891 + 2,232), taking `places.json` to ~4,000.
   Zoom deep to see them (suburb names from ~12×, locality names from ~24×).
 - **Local roads** linking every place to the network, drawn as dotted lines (a minimum spanning tree grown
   outward from the towns); picking a place wires its whole chain of roads into the graph so all
@@ -155,10 +155,10 @@ Branches: `main` = this version; `node_dot_search` = the dot animation, without 
 
 ---
 
-## Round 4: OpenStreetMap places and real speed limits
+## Round 4: open-map-data places and real speed limits
 
 ### Added
-- **~870 extra towns, villages and hamlets** from OpenStreetMap (`places.json`): searchable and tappable,
+- **~870 extra towns, villages and hamlets** from open map data (`places.json`): searchable and tappable,
   added to the routing graph only when picked.
 - **Per-road speed limits** (`speeds.json`) from signed `maxspeed` tags for all 228 roads (fallback:
   Queensland's 100 km/h default, or 80 km/h for mostly unsealed roads). Real limits: 110 on the Bruce
@@ -167,7 +167,7 @@ Branches: `main` = this version; `node_dot_search` = the dot animation, without 
 - A © OpenStreetMap contributors credit on the map.
 
 ### Changed
-- 167 of 195 town coordinates snapped to OpenStreetMap's positions (none moved more than 8 km).
+- 167 of 195 town coordinates snapped to the map database's positions (none moved more than 8 km).
 - The blanket 110 / 95 / 75 km/h speeds by road type were dropped.
 - Labels: bigger towns win, smaller ones appear as you zoom in, overlapping labels are skipped.
 
@@ -219,7 +219,7 @@ Branches: `main` = this version; `node_dot_search` = the dot animation, without 
 
 ## Baseline (as first read)
 
-A Vite + React project wrapping a single-file canvas app: 33 Queensland towns, a stylised outline,
+A bundled web project wrapping a single-file canvas app: 33 Queensland towns, a stylised outline,
 six routing algorithms (BFS, DFS, IDS, Dijkstra, A*, IDA*) animated as dots, turn-by-turn drive, a
 police / hazard / crash report system with an admin panel, light and dark themes, pan / scroll / pinch
 zoom, and preferences saved in `localStorage`.

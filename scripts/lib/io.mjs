@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const CACHE_DIR = path.join(ROOT, 'scripts', '.cache');
 export const DATA_DIR = path.join(ROOT, 'src', 'data');
-export const USER_AGENT = 'driftline-nav-data/1.0 (open-source hobby map; OSM data, ODbL)';
+export const USER_AGENT = 'driftline-nav-data/1.0 (open-source hobby map; open map data)';
 export const FLAGS = new Set(process.argv.slice(2).filter(a => a.startsWith('--')));
 
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -29,11 +29,11 @@ export async function cached(name, fetcher) {
   return data;
 }
 
-const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
-export async function overpass(query, { retries = 4 } = {}) {
+const MAP_QUERY_URLS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+export async function queryMap(query, { retries = 4 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt < retries; attempt++) {
-    const url = OVERPASS[attempt % OVERPASS.length];
+    const url = MAP_QUERY_URLS[attempt % MAP_QUERY_URLS.length];
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -48,8 +48,8 @@ export async function overpass(query, { retries = 4 } = {}) {
   throw lastErr;
 }
 
-// Driving route between two [lon, lat] points from the public OSRM demo server (OSM data).
-export async function osrmRoute(a, b, { retries = 4 } = {}) {
+// Driving route between two [lon, lat] points from a public routing service (open map data).
+export async function routeBetween(a, b, { retries = 4 } = {}) {
   const url = `https://router.project-osrm.org/route/v1/driving/${a[0]},${a[1]};${b[0]},${b[1]}?overview=full&geometries=geojson&continue_straight=false`;
   for (let attempt = 0; attempt < retries; attempt++) {
     try {

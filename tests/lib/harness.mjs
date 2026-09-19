@@ -1,5 +1,5 @@
 // A tiny fake browser for testing the real app code (src/driftline.js) without a browser.
-// It loads the app through Vite (so its JSON imports work), gives it a fake DOM, a virtual clock
+// It loads the app through the bundler (so its JSON imports work), gives it a fake DOM, a virtual clock
 // (timers, requestAnimationFrame and performance.now all follow `advance(ms)`), and records what
 // the canvas is asked to draw.
 import { createServer } from 'vite';

@@ -1,13 +1,13 @@
-// Builds src/data/coast.json: Queensland's real coastline from OpenStreetMap (natural=coastline).
+// Builds src/data/coast.json: Queensland's real coastline from open map data (natural=coastline).
 //
 //   node scripts/fetch-coast.mjs [--refresh]
 //
-// OSM coastline ways are directed with the land on their left. This script stitches them into
+// Coastline ways are directed with the land on their left. This script stitches them into
 // chains, cuts the mainland chain to the Queensland stretch (Point Danger -> around Cape York ->
 // the NT border in the Gulf), closes it along the NSW / SA / NT borders, and keeps every island
 // bigger than MIN_ISLAND_KM2. Output: an array of rings ([lat, lon] points), mainland first.
 import path from 'node:path';
-import { cached, overpass, DATA_DIR, writeRows } from './lib/io.mjs';
+import { cached, queryMap, DATA_DIR, writeRows } from './lib/io.mjs';
 import { simplify, round4, ringAreaKm2, kmLL } from './lib/geo.mjs';
 
 const MIN_ISLAND_KM2 = 3;
@@ -26,7 +26,7 @@ const BORDER = [
 
 console.log('Coastline');
 const raw = await cached('coast-ways.json', () =>
-  overpass('[out:json][timeout:270];way["natural"="coastline"](-29.3,137.8,-9.0,154.3);out geom;'));
+  queryMap('[out:json][timeout:270];way["natural"="coastline"](-29.3,137.8,-9.0,154.3);out geom;'));
 
 // ---- stitch ways into chains ----
 const key = p => p.lat.toFixed(7) + ',' + p.lon.toFixed(7);

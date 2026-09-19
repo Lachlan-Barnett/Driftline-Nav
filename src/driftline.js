@@ -2,7 +2,7 @@
 // graph.js / algorithms.js (pure, tested without a browser); this file is the interface on top:
 // canvas drawing, camera, search, trip planner, navigation, reports, settings.
 //
-// Real-world data from OpenStreetMap (© OpenStreetMap contributors, ODbL), built by scripts/:
+// Real-world map data (the credit is in the map footer), built by scripts/:
 //   places.json      extra named places, [name, lat, lon, kind]
 //   local-roads.json the local road linking each of those places in, with its real shape
 //   roads.json       the real driving shape of each road in network.js
@@ -1381,7 +1381,7 @@ export function initDriftline() {
   }
 
   rafId = requestAnimationFrame(frame);
-  setTimeout(handleViewportChange, 250); // re-fit once mobile browser chrome (address bar) settles
+  setTimeout(handleViewportChange, 250); // re-fit once the mobile browser toolbar (address bar) settles
   showToast("Pick a routing algorithm, then search a Queensland town", 3600);
   }catch(err){
     document.body.innerHTML = '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;'

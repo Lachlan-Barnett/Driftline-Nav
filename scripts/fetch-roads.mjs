@@ -2,17 +2,17 @@
 //
 //   node scripts/fetch-roads.mjs [--refresh]
 //
-// Each road is routed between its two towns with OSRM (OpenStreetMap data), simplified to ~30 m,
+// Each road is routed between its two towns with a public routing service, simplified to ~30 m,
 // and written as "TownA|TownB": [[lat, lon], ...], one road per line. Routes are cached in
-// scripts/.cache/osrm-roads.json, so re-running only fetches roads that are new.
+// scripts/.cache/route-roads.json, so re-running only fetches roads that are new.
 import path from 'node:path';
-import { readCache, writeCache, osrmRoute, sleep, DATA_DIR, writeKeyed, FLAGS } from './lib/io.mjs';
+import { readCache, writeCache, routeBetween, sleep, DATA_DIR, writeKeyed, FLAGS } from './lib/io.mjs';
 import { simplify, round4, kmLL } from './lib/geo.mjs';
 import { TOWNS, ROADS } from '../src/data/network.js';
 
-const CACHE = 'osrm-roads.json';
+const CACHE = 'route-roads.json';
 const TOL_KM = 0.03;
-// Roads OSRM cannot drive (no drivable road in OSM): left as straight lines.
+// Roads the router cannot drive (no drivable road in the data): left as straight lines.
 const STRAIGHT = new Set(['Gregory Downs|Camooweal']);
 
 console.log('Road shapes');
@@ -22,7 +22,7 @@ let fetched = 0;
 for (const [a, b] of ROADS) {
   const key = a + '|' + b;
   if (routes[key] && routes[key].ok) continue;
-  routes[key] = await osrmRoute([pos[a].lon, pos[a].lat], [pos[b].lon, pos[b].lat]);
+  routes[key] = await routeBetween([pos[a].lon, pos[a].lat], [pos[b].lon, pos[b].lat]);
   if (++fetched % 10 === 0) { writeCache(CACHE, routes); console.log(`  fetched ${fetched} new routes`); }
   await sleep(350);
 }
