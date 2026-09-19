@@ -39,7 +39,7 @@ export const markup = `
   <div id="menuPanel" class="panel">
     <b>Features</b>
     <div id="featureList">
-      <div class="featureRow"><div class="featureDot"></div>Search and drive to any of 33 Queensland towns</div>
+      <div class="featureRow"><div class="featureDot"></div>Search and drive to any of 190+ Queensland towns, plus 3,900+ suburbs, villages, hamlets and localities you can search or tap</div>
       <div class="featureRow"><div class="featureDot"></div>Pick your routing algorithm — BFS, DFS, IDS, Dijkstra, A*, or IDA* — and watch it search the map live</div>
       <div class="featureRow"><div class="featureDot"></div>Turn-by-turn directions with live speed, time and distance remaining, and arrival time</div>
       <div class="featureRow"><div class="featureDot"></div>Report police, hazards or crashes, and see what's on the way to your destination</div>
@@ -101,7 +101,7 @@ export const markup = `
 </div>
 
 <div id="toastWrap"></div>
-<div id="cityTag">Queensland · stylised map</div>
+<div id="cityTag">Queensland · stylised map · © OpenStreetMap contributors</div>
 
 <div id="reportsFanLayer"></div>
 <div id="reportsFabWrap">

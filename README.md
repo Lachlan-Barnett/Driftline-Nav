@@ -58,5 +58,19 @@ that map fairly directly onto what would become separate components/hooks.
 
 - All state (theme, chosen algorithm, animate-search toggle, active reports)
   persists to the browser's `localStorage`, so it survives refreshes.
-- The map is a stylised, procedurally-laid-out representation of
-  Queensland's major towns and highways — not real GPS/map-tile data.
+- The map is a stylised representation of Queensland, not real map-tile data:
+  195 towns are placed by their real latitude/longitude, the state outline
+  (coast, Gulf of Carpentaria, and the NT/SA/NSW borders) is hand-traced from
+  real coordinates, and roads are straight lines between towns following the
+  real highway network. Town labels appear by size as you zoom in (up to 64x).
+- `src/data/places.json` holds ~4,000 extra places (towns, villages, hamlets,
+  suburbs and rural localities) from OpenStreetMap (© OpenStreetMap contributors, ODbL). Each is linked to its
+  nearest neighbour by a local road (a minimum spanning tree grown outward
+  from the towns), drawn as a dotted line. They're searchable and tappable, but
+  only join the routing graph when picked: that adds the place and its chain of
+  local roads, so all six algorithms can route to it.
+- `src/data/speeds.json` holds a speed limit for every road, taken from the
+  signed `maxspeed` values in OpenStreetMap (length-weighted most common limit
+  along each road). Roads OSM has no limit for use Queensland's 100 km/h
+  default, or 80 km/h if they are mostly unsealed. Both files are one-off
+  snapshots (fetched 19 Sep 2026); they don't update by themselves.

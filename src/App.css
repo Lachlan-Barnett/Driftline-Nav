@@ -35,8 +35,10 @@
     backdrop-filter:blur(14px); box-shadow:var(--shadow); }
 
   #topWrap{position:fixed; top:calc(16px + env(safe-area-inset-top)); left:calc(16px + env(safe-area-inset-left)); right:calc(16px + env(safe-area-inset-right)); z-index:20; display:flex; flex-direction:column; align-items:center; gap:10px;}
-  #searchRow{width:100%; max-width:480px; display:flex; gap:10px;}
-  #searchCard{flex:1; padding:10px 12px; display:flex; align-items:center; gap:10px; min-width:0;}
+  #searchRow{width:100%; display:flex; gap:10px;}
+  #searchCard{flex:1 1 auto; max-width:380px; padding:10px 12px; display:flex; align-items:center; gap:10px; min-width:0;}
+  #algBtn{margin-left:auto;}
+  #menuPanel, #algPanel, #adminPanel{align-self:flex-end;}
   #searchCard svg{flex:none; opacity:.7;}
   #searchInput{ flex:1; min-width:0; background:transparent; border:none; outline:none; color:var(--text);
     font-family:inherit; font-size:15px; font-weight:500; }
@@ -195,7 +197,7 @@
     transition:opacity .25s, transform .25s; max-width:320px; text-align:center; }
   .toast.show{opacity:1; transform:translateY(0);}
 
-  #suggestBox{ position:fixed; z-index:19; top:70px; left:16px; right:16px; max-width:480px; margin:0 auto;
+  #suggestBox{ position:fixed; z-index:19; top:70px; left:16px; right:16px; max-width:380px; margin:0;
     border-radius:16px; overflow:hidden; display:none; max-height:280px; overflow-y:auto; }
   #suggestBox.show{display:block;}
   .suggestItem{padding:12px 16px; display:flex; align-items:center; gap:12px; cursor:pointer; font-size:14px;}
