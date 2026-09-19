@@ -68,8 +68,9 @@ that map fairly directly onto what would become separate components/hooks.
   public OSRM router and simplified to ~30 m. Road lengths and drive times come
   from these shapes. The local roads to the extra places are still straight
   lines.
-- `src/data/places.json` holds ~4,000 extra places (towns, villages, hamlets,
-  suburbs and rural localities) from OpenStreetMap (© OpenStreetMap contributors, ODbL). Each is linked to its
+- `src/data/places.json` holds ~4,000 extra places from OpenStreetMap. Each row
+  is `[name, lat, lon, kind]`, where kind is `city`, `town`, `village`,
+  `hamlet`, `suburb` or `locality` (© OpenStreetMap contributors, ODbL). Each is linked to its
   nearest neighbour by a local road (a minimum spanning tree grown outward
   from the towns), drawn as a dotted line. They're searchable and tappable, but
   only join the routing graph when picked: that adds the place and its chain of
