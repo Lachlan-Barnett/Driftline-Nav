@@ -13,7 +13,7 @@ export function loadGraphData() {
   return {
     towns: TOWNS, roads: ROADS,
     roadShapes: readData('roads.json'), speedLimits: readData('speeds.json'),
-    coast: readData('coast.json'), places: readData('places.json'), localRoads: readData('local-roads.json'),
+    coast: readData('coast.json'), places: readData('places.json'), localRoads: readData('local-roads.json'), junctions: readData('junctions.json'),
   };
 }
 

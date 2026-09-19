@@ -30,20 +30,29 @@ test('data: every town sits inside the real coastline', () => {
   for (const [name, lat, lon] of towns) assert.ok(rings.some(r => pointInRing(proj(lat, lon), r)), name + ' is outside the coast');
 });
 
-test('data: every extra place has a valid local road', () => {
-  const { places, localRoads, towns } = loadGraphData();
-  const townNames = new Set(towns.map(t => t[0]));
+test('data: every extra place is attached to a road (on it, or by a side road from a junction)', () => {
+  const { places, localRoads } = loadGraphData();
   assert.equal(localRoads.length, places.length, 'local-roads.json is out of step with places.json (run npm run data:local-roads)');
-  localRoads.forEach(([idx, name, parent], i) => {
+  let onRoad = 0;
+  localRoads.forEach(([idx, name, lat, lon, side], i) => {
     assert.equal(idx, i); assert.equal(name, places[i][0], 'row ' + i + ' is for a different place');
-    if (typeof parent === 'number') assert.ok(parent >= 0 && parent < places.length && parent !== i);
-    else assert.ok(townNames.has(parent), 'unknown parent town ' + parent);
+    assert.ok(lat < -9 && lat > -30 && lon > 137 && lon < 155, 'junction outside Queensland for ' + name);
+    assert.ok(side === 0 || side === null || (Array.isArray(side) && side.length >= 2), 'bad side road for ' + name);
+    if (side === 0) onRoad++;
   });
-  // every chain of parents must end at a town (no cycles)
-  for (let i = 0; i < places.length; i++) {
-    let cur = i, steps = 0;
-    while (typeof localRoads[cur][2] === 'number') { cur = localRoads[cur][2]; assert.ok(++steps < places.length, 'cycle in local roads at ' + i); }
+  assert.ok(onRoad > 300, 'expected hundreds of places to sit on a main road, got ' + onRoad);
+});
+
+test('data: junction nodes and the pieces of the roads they cut are consistent', () => {
+  const { junctions, roads, towns } = loadGraphData();
+  const ids = new Set(junctions.junctions.map(j => j[0])), townNames = new Set(towns.map(x => x[0]));
+  const keys = new Set(roads.map(r => r[0] + '|' + r[1]));
+  for (const key of junctions.replaced) assert.ok(keys.has(key), 'unknown road ' + key);
+  for (const [from, to, shape, owner] of junctions.pieces) {
+    for (const id of [from, to]) assert.ok(ids.has(id) || townNames.has(id), 'piece refers to unknown node ' + id);
+    assert.ok(shape.length >= 2 && keys.has(owner));
   }
+  for (const key of junctions.replaced) assert.ok(junctions.pieces.some(p => p[3] === key) || junctions.pieces.length, 'replaced road with no pieces');
 });
 
 test('graph: the road network is fully connected', () => {
@@ -98,7 +107,7 @@ test('reports: a crash adds delay to its road, and routing goes around it when i
   const seg = base.path[Math.floor(base.path.length / 2)], e = graph.edges[seg.edgeIdx];
   const mid = graph.pointAlong(e, true, e.len / 2);
   graph.recomputeDelays([{ type: 'crash', x: mid.x, y: mid.y }]);
-  assert.ok(e.delaySec >= 1500, 'crash delay not applied');
+  assert.ok(Math.max(e.delayFwd, e.delayBack) >= 1500, 'crash delay not applied');
   const after = ALGS.dijkstra.fn(a, b);
   assert.ok(after.totalSec >= base.totalSec, 'delay cannot make the trip faster');
   settings.avoidReports = false; assert.ok(near(graph.edgeSeconds(e) - graph.edgeSeconds(e), 0));
@@ -131,16 +140,69 @@ test('start pin: splitting a road keeps it drivable and its length unchanged', (
   assert.ok(hit && hit.d < 1e-6);
 });
 
-test('places: picking a suburb wires in its whole chain of local roads and routes to it', () => {
+test('places: picking a suburb attaches it to the road network and every algorithm can reach it', () => {
   const { graph, ALGS } = makeWorld();
   const start = graph.NID['Brisbane'];
   for (const name of ['Browns Plains', 'Surfers Paradise']) {
     const place = graph.places.find(p => p.name === name);
     assert.ok(place, name + ' missing from places.json');
     const node = graph.ensurePlaceNode(place);
-    assert.ok(node.virtual);
     for (const k of Object.keys(ALGS)) assert.ok(ALGS[k].fn(start, node.id), `${k} could not reach ${name}`);
   }
   const far = graph.places.find(p => p.kind === 'hamlet');
   assert.ok(ALGS.dijkstra.fn(start, graph.ensurePlaceNode(far).id));
+});
+
+test('places: Jimboomba is on the Mount Lindesay Highway, so the route there is the highway, not side streets', () => {
+  const { graph, ALGS } = makeWorld();
+  const jim = graph.places.find(p => p.name === 'Jimboomba');
+  assert.equal(jim.spur, 0, 'Jimboomba should be marked as on a main road');
+  const node = graph.ensurePlaceNode(jim);
+  assert.equal(node.name, 'Jimboomba');
+  const around = graph.adj.get(node.id).map(l => graph.edges[l.edgeIdx].name);
+  assert.deepEqual([...new Set(around)], ['Mount Lindesay Highway'], 'both roads out of Jimboomba are the highway');
+  const r = ALGS.dijkstra.fn(graph.NID['Brisbane'], node.id);
+  assert.ok(r.path.every(s => !/^Local roads/.test(graph.edges[s.edgeIdx].name)), 'no local side roads on the way');
+  assert.ok(r.path.length <= 4, 'a couple of highway pieces, not dozens of hops (got ' + r.path.length + ')');
+  // and carrying on through it to Beaudesert is one continuous road: no edge is driven twice
+  const beau = ALGS.dijkstra.fn(node.id, graph.NID['Beaudesert']);
+  const used = new Set(r.path.map(s => s.edgeIdx));
+  assert.ok(beau.path.every(s => !used.has(s.edgeIdx)), 'the second leg must not go back over the first');
+});
+
+test('places: a place off the road gets a side road from its junction, and a stop there is a real detour', () => {
+  const { graph, ALGS } = makeWorld();
+  const off = graph.places.find(p => p.spur && p.spur.length > 3);
+  assert.ok(off, 'expected some places with a shaped side road');
+  const node = graph.ensurePlaceNode(off);
+  assert.ok(node.virtual);
+  const side = graph.adj.get(node.id);
+  assert.equal(side.length, 1, 'a place at the end of a side road has exactly one road');
+  assert.match(graph.edges[side[0].edgeIdx].name, /^Local roads to /);
+  assert.ok(ALGS.dijkstra.fn(graph.NID['Brisbane'], node.id));
+});
+
+test('roads: forks are real junctions, so a trip between two roads that share a stretch does not go to the town and back', () => {
+  const { graph, ALGS } = makeWorld();
+  const path = r => r.path.map(s => graph.nodes[s.to].name);
+  const wb = path(ALGS.dijkstra.fn(graph.NID['Weipa'], graph.NID['Bamaga']));
+  assert.ok(!wb.includes('Coen'), 'Weipa -> Bamaga should turn off at the fork, not visit Coen: ' + wb.join(' > '));
+  const junctions = graph.nodes.filter(n => n.junction);
+  assert.ok(junctions.length > 30 && junctions.every(n => n.virtual), 'junction nodes exist and are never shown as places');
+});
+
+test('reports: a report applies only to the direction it was reported travelling', () => {
+  const { graph, settings } = makeWorld();
+  const e = graph.edges.find(x => x.type === 'highway' && x.len > 8);
+  const mid = graph.pointAlong(e, true, e.len / 2);
+  const hazard = heading => [{ type: 'crash', x: mid.x, y: mid.y, heading }];
+  graph.recomputeDelays(hazard(mid.heading));                                    // travelling a -> b
+  assert.ok(e.delayFwd > 0 && !e.delayBack, 'forward report delays only the forward direction');
+  assert.ok(graph.edgeSeconds(e, true) > graph.edgeSeconds(e, false), 'driving the other way is not delayed');
+  graph.recomputeDelays(hazard(mid.heading + Math.PI));                          // travelling b -> a
+  assert.ok(!e.delayFwd && e.delayBack > 0);
+  graph.recomputeDelays(hazard(undefined));                                      // unknown direction: both
+  assert.ok(e.delayFwd > 0 && e.delayBack > 0);
+  settings.avoidReports = false; assert.equal(graph.edgeSeconds(e, true), graph.edgeSeconds(e, false));
+  settings.avoidReports = true; graph.recomputeDelays([]);
 });

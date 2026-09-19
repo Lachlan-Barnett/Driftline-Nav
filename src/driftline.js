@@ -6,6 +6,7 @@
 //   places.json      extra named places, [name, lat, lon, kind]
 //   local-roads.json the local road linking each of those places in, with its real shape
 //   roads.json       the real driving shape of each road in network.js
+//   junctions.json   where roads that share a road out of a town fork (real junction nodes)
 //   speeds.json      the signed speed limit of each road
 //   coast.json       the real coastline (mainland + islands)
 import PLACE_DATA from './data/places.json';
@@ -13,6 +14,7 @@ import LOCAL_ROADS from './data/local-roads.json';
 import SPEED_LIMITS from './data/speeds.json';
 import ROAD_SHAPES from './data/roads.json';
 import COAST from './data/coast.json';
+import JUNCTIONS from './data/junctions.json';
 import { TOWNS, ROADS } from './data/network.js';
 import { WORLD_W, WORLD_H, KM_PER_UNIT } from './projection.js';
 import { createGraph } from './graph.js';
@@ -53,18 +55,22 @@ export function initDriftline() {
 
   /* ============== GRAPH + ALGORITHMS ============== */
   const graph = createGraph({ towns:TOWNS, roads:ROADS, roadShapes:ROAD_SHAPES, speedLimits:SPEED_LIMITS,
-    coast:COAST, places:PLACE_DATA, localRoads:LOCAL_ROADS }, settings);
+    coast:COAST, places:PLACE_DATA, localRoads:LOCAL_ROADS, junctions:JUNCTIONS }, settings);
   const { nodes, edges, NID, places, LAND, edgeSeconds, edgeKm, pointAlong, edgeBearing } = graph;
   const { ALGS, runDijkstra } = createAlgorithms(graph);
 
   /* ============== CANVAS / CAMERA ============== */
   const canvas=$('map'), ctx=canvas.getContext('2d');
+  // A second transparent canvas over the map holds the things that pulse (you and the reports), so the
+  // pulse redraws a few shapes instead of the whole map.
+  const overlay=$('overlay'), octx=overlay.getContext('2d');
   let dpr=Math.min(window.devicePixelRatio||1,2), scale=1, offsetX=0, offsetY=0, W=0,H=0;
   function resize(){
     const rect = canvas.getBoundingClientRect();
     W = rect.width; H = rect.height;
     dpr=Math.min(window.devicePixelRatio||1,2);
     canvas.width=Math.max(1,Math.round(W*dpr)); canvas.height=Math.max(1,Math.round(H*dpr));
+    overlay.width=canvas.width; overlay.height=canvas.height;
   }
   function handleViewportChange(){ resize(); if(!hasInteracted) fitToState(); }
   window.addEventListener('resize', handleViewportChange);
@@ -75,6 +81,18 @@ export function initDriftline() {
   if(window.visualViewport){
     window.visualViewport.addEventListener('resize', handleViewportChange);
     cleanupFns.push(()=> window.visualViewport.removeEventListener('resize', handleViewportChange));
+  }
+  const textWidths=new Map();          // label widths at the 12 px label font; cleared once the web font has loaded
+  if(document.fonts && document.fonts.ready) document.fonts.ready.then(()=>textWidths.clear());
+  const HAS_PATH2D = typeof Path2D !== 'undefined';
+  let landPath=null;
+  function getLandPath(){
+    if(!landPath){ landPath=new Path2D(); LAND.forEach(poly=>{ poly.forEach((p,i)=> i===0?landPath.moveTo(p.x,p.y):landPath.lineTo(p.x,p.y)); landPath.closePath(); }); }
+    return landPath;
+  }
+  function edgePath(e){
+    if(!e.path2d){ const p=new Path2D(); e.pts.forEach((q,i)=> i===0?p.moveTo(q.x,q.y):p.lineTo(q.x,q.y)); e.path2d=p; }
+    return e.path2d;
   }
   const MIN_SCALE=0.35, MAX_SCALE=300;
   function clampScale(v){ return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v)); }
@@ -228,15 +246,16 @@ export function initDriftline() {
     return Math.floor(m/60)+'h ago';
   }
   // Reports are put on the road (snapped to the nearest one), and slow that road down: see graph.recomputeDelays.
-  function addHazardAt(type, wx, wy){
+  // heading = the way you were driving when you reported it; without one it applies to both directions
+  function addHazardAt(type, wx, wy, heading){
     const hit=graph.nearestRoadPoint(wx,wy);
     const x = hit && hit.d<6 ? hit.x : wx, y = hit && hit.d<6 ? hit.y : wy;
-    hazards.push({id:genId(), type, x, y, t:Date.now()}); saveHazards();
+    hazards.push({id:genId(), type, x, y, t:Date.now(), heading}); saveHazards();
     const where = hit && hit.d<6 ? ' on '+edges[hit.edgeIdx].name : ' nearby';
-    showToast(TYPE_LABELS[type]+' reported'+where);
+    showToast(TYPE_LABELS[type]+' reported'+where+(heading!==undefined ? ' (your direction)' : ''));
     hazardsChanged();
   }
-  function addHazard(type){ addHazardAt(type, car.x, car.y); }
+  function addHazard(type){ addHazardAt(type, car.x, car.y, navActive ? car.heading : undefined); }
   let replanTimer=null;
   function hazardsChanged(){
     graph.recomputeDelays(hazards);
@@ -250,27 +269,27 @@ export function initDriftline() {
   }
 
   /* ---- "on the way" report matching ---- */
-  const ON_ROUTE_THRESHOLD = 7; // world units — roughly the width of a highway corridor at this map's scale
-  function pointSegDist(px,py, ax,ay,bx,by){
-    const dx=bx-ax, dy=by-ay, lenSq=dx*dx+dy*dy;
-    let t = lenSq>0 ? ((px-ax)*dx+(py-ay)*dy)/lenSq : 0;
-    t = Math.max(0, Math.min(1,t));
-    return Math.hypot(px-(ax+t*dx), py-(ay+t*dy));
-  }
-  function hazardsOnRoute(path, fromIdx){
+  const ON_ROUTE_UNITS = 0.7;   // ~1.3 km: a report counts as on a road only if it is really on it
+  // Reports on the route that matter to you: on a road of the route, applying to the way you drive it
+  // (not the opposite carriageway), and not already behind you on the road you are on (carAlong = how far
+  // along that first road the car is, in map units).
+  function hazardsOnRoute(path, fromIdx, carAlong){
     if(!path) return [];
-    const segs = path.slice(fromIdx||0);
-    return hazards.filter(h=>{
-      let minD=Infinity;
-      segs.forEach(seg=>{
-        const pts=edges[seg.edgeIdx].pts;
-        for(let k=1;k<pts.length;k++){
-          const d=pointSegDist(h.x,h.y, pts[k-1].x,pts[k-1].y, pts[k].x,pts[k].y);
-          if(d<minD) minD=d;
-        }
-      });
-      return minD<=ON_ROUTE_THRESHOLD;
+    const start=fromIdx||0, out=[];
+    hazards.forEach(h=>{
+      for(let i=start;i<path.length;i++){
+        const seg=path[i], e=edges[seg.edgeIdx]; if(e.removed) continue;
+        const bb=e.bbox; if(h.x<bb.x0-ON_ROUTE_UNITS || h.x>bb.x1+ON_ROUTE_UNITS || h.y<bb.y0-ON_ROUTE_UNITS || h.y>bb.y1+ON_ROUTE_UNITS) continue;
+        const hit=graph.projectOnEdge(e, h.x, h.y);
+        if(!hit || hit.d>ON_ROUTE_UNITS) continue;
+        const fwd=seg.from===e.a, dir=graph.reportDirection(e, hit.dist, h.heading);
+        if(dir!=='both' && (dir==='fwd')!==fwd) continue;              // it is on the other side / other way
+        const along = fwd ? hit.dist : e.len-hit.dist;                  // how far into this road we meet it
+        if(i===start && carAlong!==undefined && along < carAlong-0.05) continue;   // already passed it
+        out.push(h); break;
+      }
     });
+    return out;
   }
   function renderRouteReportRows(list){
     return list.map(h=>`<div class="routeReportRow">
@@ -283,7 +302,7 @@ export function initDriftline() {
     const panel=$('routeReportsPanel');
     const list=$('routeReportsList');
     if(!navActive || !currentPath){ panel.classList.remove('show'); return; }
-    const onRoute = hazardsOnRoute(currentPath, navSegIdx);
+    const onRoute = hazardsOnRoute(currentPath, navSegIdx, navCarAlong);
     if(onRoute.length>0){ list.innerHTML=renderRouteReportRows(onRoute); panel.classList.add('show'); }
     else { panel.classList.remove('show'); list.innerHTML=''; }
   }
@@ -367,7 +386,7 @@ export function initDriftline() {
       const rows = groups[type].map(h=>{
         const dist = Math.hypot(h.x-car.x, h.y-car.y)*KM_PER_UNIT;
         return `<div class="reportRow"><div class="reportDot" style="background:var(${TYPE_COLORS[type]})"></div>
-          <div class="reportInfo"><div class="reportMeta">${timeAgo(h.t)} · ${dist.toFixed(0)} km away</div></div>
+          <div class="reportInfo"><div class="reportMeta">${timeAgo(h.t)} · ${dist.toFixed(0)} km away${h.heading!==undefined ? ' · one direction' : ''}</div></div>
           <button class="reportRemove" data-id="${h.id}" aria-label="Remove this report">✕</button></div>`;
       }).join('');
       const isArmed = armedType===type;
@@ -436,8 +455,14 @@ export function initDriftline() {
   /* ============== THEME ============== */
   const root=document.documentElement;
   let isDay = typeof prefs.day==='boolean' ? prefs.day : false;
+  // The colours the canvas uses, read from the stylesheet once (and again when the theme changes):
+  // asking the browser for computed styles on every frame is slow.
+  const colors={};
+  const COLOR_VARS=['--bg','--land','--border-line','--road-local','--road-local-line','--road-outback','--road-outback-line','--road-hwy','--road-hwy-line','--path','--path-glow','--text','--route','--map-bg','--user','--blue','--amber','--red'];
+  function readColors(){ const s=getComputedStyle(root); COLOR_VARS.forEach(k=>{ colors[k]=s.getPropertyValue(k).trim(); }); }
   function setTheme(day){
     root.setAttribute('data-theme', day?'day':'night');
+    readColors();
     const menuSwitch=$('menuThemeSwitch');
     if(menuSwitch) menuSwitch.classList.toggle('on', !day); // switch reads "Dark mode" — on means night theme active
   }
@@ -551,7 +576,63 @@ export function initDriftline() {
     renderTripPanel();
   }
   function pinSvg(){ return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 1114 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>'; }
-  let suggestItems=[];
+  /* ---- search matching: forgiving of case, punctuation, abbreviations ("Mt" = Mount) and small typos ---- */
+  const ABBREV = { mt:'mount', mtn:'mountain', st:'saint', sth:'south', nth:'north', pt:'point', ck:'creek', hwy:'highway', hts:'heights', bch:'beach', rd:'road' };
+  const normText = s=>String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/['’]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  function within1(a,b){                      // edit distance of at most one letter
+    if(a===b) return true;
+    const la=a.length, lb=b.length; if(Math.abs(la-lb)>1) return false;
+    let i=0, j=0, edits=0;
+    while(i<la && j<lb){
+      if(a[i]===b[j]){ i++; j++; continue; }
+      if(++edits>1) return false;
+      if(la>lb) i++; else if(lb>la) j++; else { i++; j++; }
+    }
+    return edits+(la-i)+(lb-j) <= 1;
+  }
+  function searchKey(n){ if(n._key===undefined){ n._key=normText(n.name); n._words=n._key.split(' '); } return n; }
+  // how well one typed word matches a name: 4 starts a word, 3 abbreviates one, 2 is inside one, 1 is a small typo, 0 no match
+  function wordMatch(t, n, fuzzy){
+    let best=0; const alt=ABBREV[t];
+    for(const w of n._words){
+      if(w.startsWith(t)) return 4;
+      if(alt && w.startsWith(alt)) best=Math.max(best,3);
+      if(t.length>=3 && w.includes(t)) best=Math.max(best,2);
+      if(fuzzy && t.length>=4 && (within1(t, w) || within1(t, w.slice(0,t.length)) || within1(t, w.slice(0,t.length+1)))) best=Math.max(best,1);
+    }
+    return best;
+  }
+  const KIND_BONUS = { city:55, town:45, village:30, hamlet:20, suburb:12, locality:5 };
+  const townBonus = n=> n.rank===1 ? 60 : n.rank===2 ? 50 : n.rank===3 ? 40 : 30;
+  function searchPlaces(q){
+    const qn=normText(q), tokens=qn.split(' ').filter(Boolean);
+    if(!tokens.length) return [];
+    const run = fuzzy=>{
+      const out=[];
+      const consider = (n, bonus)=>{
+        searchKey(n);
+        let score;
+        if(n._key===qn) score=1000;
+        else if(n._key.startsWith(qn)) score=900;
+        else {
+          let worst=4;
+          for(const t of tokens){ const m=wordMatch(t,n,fuzzy); if(!m){ worst=0; break; } worst=Math.min(worst,m); }
+          if(!worst) return;
+          score=300+worst*80+(n._key.includes(qn)?30:0);
+        }
+        const d=distFromCar(n);
+        out.push({ poi:n, d, score: score+bonus-Math.min(d,2000)/100 });
+      };
+      for(const n of nodes){ if(!n.virtual) consider(n, townBonus(n)); }
+      for(const p of places) consider(p, KIND_BONUS[p.kind]||0);
+      return out;
+    };
+    let res=run(false);
+    if(res.length<5) res=run(true);              // few hits: allow a typo
+    res.sort((x,y)=> y.score-x.score);
+    return res.slice(0,40);
+  }
+  let suggestItems=[], suggestActive=-1;         // suggestActive: the highlighted row, for the keyboard
   const distFromCar = n=> Math.hypot(n.x-car.x,n.y-car.y)*KM_PER_UNIT;
   function buildSuggestions(q){
     const items=[];
@@ -567,24 +648,23 @@ export function initDriftline() {
       items.push(...nearby);
       return items;
     }
-    // exact name first, then name-prefix matches, then nearest first
-    const rankMatch = n=>{ const nm=n.name.toLowerCase(); return nm===q ? 2 : nm.startsWith(q) ? 1 : 0; };
-    const matches = nodes.filter(n=>!n.virtual && n.name.toLowerCase().includes(q))
-      .concat(places.filter(p=>p.name.toLowerCase().includes(q)))
-      .map(asItem);
-    matches.sort((a,b)=> (rankMatch(b.poi)-rankMatch(a.poi)) || a.d-b.d);
-    return matches.slice(0,40);
+    const found = searchPlaces(q);
+    return found.map(f=>({ poi:f.poi, d:f.d }));
   }
-  function renderSuggestions(q){
+  function renderSuggestions(q, keepActive){
     suggestItems=buildSuggestions(q);
+    const firstRow=suggestItems.findIndex(it=>it.poi);
+    if(!keepActive || !suggestItems[suggestActive] || !suggestItems[suggestActive].poi) suggestActive = q ? firstRow : -1;
     suggestBox.innerHTML=suggestItems.map((it,i)=>{
       if(it.header) return `<div class="suggestHead">${it.header}</div>`;
-      const n=it.poi, kind = n.nodeId!==undefined ? n.label+' · ' : '', fav=isFav(n);
-      return `<div class="suggestItem" data-i="${i}"><div class="suggestIcon">${pinSvg()}</div>
+      const n=it.poi, kind = n.nodeId!==undefined ? n.label+' · near '+esc(graph.nearestTownName(n.x,n.y))+' · ' : '', fav=isFav(n);
+      return `<div class="suggestItem${i===suggestActive?' active':''}" data-i="${i}"><div class="suggestIcon">${pinSvg()}</div>
         <div class="suggestBody"><div class="suggestName">${esc(n.name)}</div><div class="suggestSub">${kind}${Math.round(it.d)} km away (straight line)</div></div>
         <button class="starBtn${fav?' on':''}" data-star="${i}" aria-label="${fav?'Remove from':'Add to'} favourites">${fav?'★':'☆'}</button></div>`;
     }).join('');
     suggestBox.classList.toggle('show', suggestItems.length>0);
+    const row=suggestBox.querySelector && suggestBox.querySelector('.suggestItem.active');
+    if(row && row.scrollIntoView) row.scrollIntoView({block:'nearest'});
   }
   const currentQuery = ()=> searchInput.value.trim().toLowerCase();
   function refreshSuggestions(){ if(suggestBox.classList.contains('show')) renderSuggestions(currentQuery()); }
@@ -597,6 +677,24 @@ export function initDriftline() {
     handlePick(it.poi);
   });
   searchInput.addEventListener('input', ()=> renderSuggestions(currentQuery()));
+  searchInput.addEventListener('keydown', e=>{
+    const rows=suggestItems.map((it,i)=>it.poi?i:-1).filter(i=>i>=0);
+    if(e.key==='ArrowDown' || e.key==='ArrowUp'){
+      if(!rows.length) return;
+      e.preventDefault();
+      if(!suggestBox.classList.contains('show')) renderSuggestions(currentQuery());
+      const pos=rows.indexOf(suggestActive);
+      suggestActive = rows[e.key==='ArrowDown' ? (pos+1)%rows.length : (pos<=0 ? rows.length-1 : pos-1)];
+      renderSuggestions(currentQuery(), true);
+    } else if(e.key==='Enter'){
+      const i = rows.includes(suggestActive) ? suggestActive : rows[0];
+      if(i===undefined) return;
+      e.preventDefault();
+      const it=suggestItems[i];
+      searchInput.value=''; suggestBox.classList.remove('show'); if(searchInput.blur) searchInput.blur();
+      handlePick(it.poi);
+    } else if(e.key==='Escape'){ suggestBox.classList.remove('show'); }
+  });
   searchInput.addEventListener('focus', ()=>{
     algPanel.classList.remove('show'); algBtn.classList.remove('active');
     closeAdminPanel(); closeFan(); closeMenu();
@@ -626,7 +724,7 @@ export function initDriftline() {
   let legs=[], currentPath=null, legEndSeg=[], currentDestination=null;
   let navActive=false, navFrac=0, navSegIdx=0, playbackSeconds=15;
   let cumLen=[], cumTime=[], segLens=[], segTimes=[];
-  let navStops=[], navLegs=[], navStopK=0, navPause=0, curSpeed=0, curLimit=100;
+  let navStops=[], navLegs=[], navStopK=0, navPause=0, curSpeed=0, curLimit=100, navCarAlong=0;
   let searchAnim=null, searchAnimsDone=[], searchTimer=null, animRunning=false, planToken=0;
   const legCache=new Map();
 
@@ -887,7 +985,7 @@ export function initDriftline() {
     if(totalSec>optimalSec*1.02){
       flag.textContent=`⚠ ${Math.round((totalSec/optimalSec-1)*100)}% slower than the fastest route`; flag.style.color='var(--amber)';
     } else { flag.textContent='✓ fastest route by travel time'; flag.style.color='var(--route)'; }
-    let delay=0; if(settings.avoidReports) currentPath.forEach(seg=>{ delay+=edges[seg.edgeIdx].delaySec||0; });
+    let delay=0; if(settings.avoidReports) currentPath.forEach(seg=>{ delay+=graph.delayFor(edges[seg.edgeIdx], seg.from===edges[seg.edgeIdx].a); });
     const note=$('delayNote');
     if(delay>0){ note.textContent=`⏱ Includes about ${Math.max(1,Math.round(delay/60))} min of delays from reports on this route`; note.classList.add('show'); }
     else { note.textContent=''; note.classList.remove('show'); }
@@ -992,7 +1090,7 @@ export function initDriftline() {
   function buildNavArrays(){
     cumLen=[0]; cumTime=[0]; segLens=[]; segTimes=[];
     currentPath.forEach(seg=>{
-      const e=edges[seg.edgeIdx], km=edgeKm(e), sec=edgeSeconds(e);
+      const e=edges[seg.edgeIdx], km=edgeKm(e), sec=edgeSeconds(e, seg.from===e.a);
       segLens.push(km); segTimes.push(sec);
       cumLen.push(cumLen[cumLen.length-1]+km);
       cumTime.push(cumTime[cumTime.length-1]+sec);
@@ -1009,7 +1107,7 @@ export function initDriftline() {
     closeFan(); closeAdminPanel(); closeMenu(); closeCompare(); suggestBox.classList.remove('show');
     searchAnim=null; searchAnimsDone=[]; if(searchTimer){ clearInterval(searchTimer); searchTimer=null; }
 
-    navStops=trip.stops.slice(); navLegs=legs.slice(); navStopK=0; navPause=0; curSpeed=0;
+    navStops=trip.stops.slice(); navLegs=legs.slice(); navStopK=0; navPause=0; curSpeed=0; navCarAlong=0;
     buildNavArrays();
     const totalSec = cumTime[cumTime.length-1];
     playbackSeconds = Math.max(9, Math.min(42, totalSec/280));
@@ -1106,12 +1204,12 @@ export function initDriftline() {
     if(rerouteState.dismissedAt===graph.delayVersion()) return;
     const seg=currentPath[navSegIdx], k=legOfSeg(navSegIdx), destId=navLegs[k].toId;
     if(seg.to===destId) return;
-    let cur=0; for(let i=navSegIdx+1;i<=legEndSeg[k];i++) cur+=edgeSeconds(edges[currentPath[i].edgeIdx]);
+    let cur=0; for(let i=navSegIdx+1;i<=legEndSeg[k];i++) { const e2=edges[currentPath[i].edgeIdx]; cur+=edgeSeconds(e2, currentPath[i].from===e2.a); }
     const best=runDijkstra(seg.to, destId); if(!best) return;
     const same = best.path.length===legEndSeg[k]-navSegIdx && best.path.every((s,j)=>s.edgeIdx===currentPath[navSegIdx+1+j].edgeIdx);
     const save=cur-best.totalSec;
     if(same || save<120) return;
-    const types=[...new Set(hazardsOnRoute(currentPath, navSegIdx).map(h=>TYPE_LABELS[h.type].toLowerCase()))];
+    const types=[...new Set(hazardsOnRoute(currentPath, navSegIdx, navCarAlong).map(h=>TYPE_LABELS[h.type].toLowerCase()))];
     rerouteState.pending={ k, path:best.path, save };
     $('rerouteText').textContent = `${types.length ? types.join(' and ') : 'Traffic'} reported ahead. A faster route saves about ${Math.round(save/60)} min.`;
     $('rerouteCard').classList.add('show');
@@ -1136,7 +1234,13 @@ export function initDriftline() {
   $('rerouteNo').onclick=()=> dismissReroute(true);
 
   /* ============== MAIN LOOP ============== */
-  let lastT=null, pulseT=0;
+  let lastT=null, pulseT=0, renderCount=0, lastSig='', lastOverlaySig='', lastPulseDraw=0;
+  // everything the picture depends on, cheaply comparable
+  function renderSignature(){
+    return [scale,offsetX,offsetY,W,H,dpr,isDay,settings.showPlaces,navActive,animRunning,
+      currentPath?currentPath.length:-1,legs.length,searchAnimsDone.length,trip.stops.map(s=>s.node.id).join(','),
+      navStops.length,graph.graphVersion(),nodes.length,edges.length].join('|');
+  }
   function frame(t){
     if(lastT===null) lastT=t;
     const dt=Math.min(0.05,(t-lastT)/1000); lastT=t; pulseT+=dt;
@@ -1165,7 +1269,7 @@ export function initDriftline() {
         const localT = segLen>0 ? Math.min(1,(target-segStart)/segLen) : 1;
         const seg=currentPath[idx], segEdge=edges[seg.edgeIdx], fwd=segForward(seg);
         const pos=pointAlong(segEdge, fwd, localT*segEdge.len);
-        car.x=pos.x; car.y=pos.y; car.heading=pos.heading;
+        car.x=pos.x; car.y=pos.y; car.heading=pos.heading; navCarAlong=localT*segEdge.len;
         if(followMode) centerOn(car.x,car.y);
 
         const elapsedTime = cumTime[idx] + (segTimes[idx]*localT);
@@ -1183,13 +1287,27 @@ export function initDriftline() {
         $('hudEta').textContent = new Date(Date.now()+remainSec*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
       }
     }
-    render();
+    // The map only needs redrawing when what it shows has changed or something on it is moving. Sitting
+    // idle it used to redraw 60 times a second, which is what made the app heavy on the browser.
+    const sig = renderSignature();
+    const moving = navActive || animRunning || !!searchAnim || dragging || pinchActive;
+    const sx=car.x*scale+offsetX, sy=car.y*scale+offsetY;
+    const pulsing = !reduceMotion && (hazards.length>0 || (!navActive && sx>-20 && sx<W+20 && sy>-20 && sy<H+20));   // the ring around you, report markers
+    const oSig = [car.x,car.y,car.heading,hazards.length,navActive].join('|');
+    if(sig!==lastSig || moving){
+      lastSig=sig; lastOverlaySig=oSig; lastPulseDraw=t;
+      renderCount++;
+      render(); renderOverlay();
+    } else if(oSig!==lastOverlaySig || (pulsing && t-lastPulseDraw>60)){
+      lastOverlaySig=oSig; lastPulseDraw=t;
+      renderOverlay();
+    }
     rafId = requestAnimationFrame(frame);
   }
 
   function render(){
     ctx.setTransform(dpr,0,0,dpr,0,0);
-    const styles=getComputedStyle(root);
+    const styles={ getPropertyValue:k=>colors[k]||'' };
     ctx.fillStyle=styles.getPropertyValue('--bg').trim(); ctx.fillRect(0,0,W,H);
 
     ctx.save(); ctx.translate(offsetX,offsetY); ctx.scale(scale,scale);
@@ -1202,7 +1320,8 @@ export function initDriftline() {
     ctx.lineJoin='round';
     ctx.fillStyle=styles.getPropertyValue('--land').trim();
     ctx.lineWidth=2/scale; ctx.strokeStyle=styles.getPropertyValue('--border-line').trim();
-    LAND.forEach(poly=>{
+    if(HAS_PATH2D){ const lp=getLandPath(); ctx.fill(lp); ctx.stroke(lp); }
+    else LAND.forEach(poly=>{
       ctx.beginPath();
       poly.forEach((p,i)=> i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y));
       ctx.closePath(); ctx.fill(); ctx.stroke();
@@ -1213,18 +1332,21 @@ export function initDriftline() {
       edges.forEach(e=>{
         if(e.removed || e.type!==kind) return;
         const bb=e.bbox; if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
-        ctx.beginPath(); e.pts.forEach((p,i)=> i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.lineCap='round'; ctx.lineJoin='round';
+        const P=HAS_PATH2D ? edgePath(e) : null;
+        if(!P){ ctx.beginPath(); e.pts.forEach((p,i)=> i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); }
+        const stk = P ? ()=>ctx.stroke(P) : ()=>ctx.stroke();
+        ctx.lineCap='round'; ctx.lineJoin='round';
         if(kind==='access'){
-          ctx.lineWidth=1.6/zs; ctx.setLineDash([3/zs,4/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); ctx.stroke(); ctx.setLineDash([]);
+          ctx.lineWidth=1.6/zs; ctx.setLineDash([3/zs,4/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); stk(); ctx.setLineDash([]);
         } else if(kind==='outback'){
-          ctx.lineWidth=4/zs; ctx.strokeStyle=styles.getPropertyValue('--road-outback').trim(); ctx.stroke();
-          ctx.lineWidth=1.4/zs; ctx.setLineDash([6/zs,7/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-outback-line').trim(); ctx.stroke(); ctx.setLineDash([]);
+          ctx.lineWidth=4/zs; ctx.strokeStyle=styles.getPropertyValue('--road-outback').trim(); stk();
+          ctx.lineWidth=1.4/zs; ctx.setLineDash([6/zs,7/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-outback-line').trim(); stk(); ctx.setLineDash([]);
         } else if(kind==='rural'){
-          ctx.lineWidth=6/zs; ctx.strokeStyle=styles.getPropertyValue('--road-local').trim(); ctx.stroke();
-          ctx.lineWidth=1.4/zs; ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); ctx.stroke();
+          ctx.lineWidth=6/zs; ctx.strokeStyle=styles.getPropertyValue('--road-local').trim(); stk();
+          ctx.lineWidth=1.4/zs; ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); stk();
         } else {
-          ctx.lineWidth=9/zs; ctx.strokeStyle=styles.getPropertyValue('--road-hwy').trim(); ctx.stroke();
-          ctx.lineWidth=1.8/zs; ctx.setLineDash([10/zs,8/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-hwy-line').trim(); ctx.stroke(); ctx.setLineDash([]);
+          ctx.lineWidth=9/zs; ctx.strokeStyle=styles.getPropertyValue('--road-hwy').trim(); stk();
+          ctx.lineWidth=1.8/zs; ctx.setLineDash([10/zs,8/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-hwy-line').trim(); stk(); ctx.setLineDash([]);
         }
       });
     });
@@ -1279,11 +1401,11 @@ export function initDriftline() {
     const stopIds = new Set((navActive ? navStops : trip.stops).map(s=>s.node.id));
     const numbered = stopIds.size>1;
     if(settings.showPlaces){
-      // local roads linking each visible place in, drawn along their real shapes
+      // side roads from the road to each visible place, drawn along their real shapes
       ctx.beginPath();
       places.forEach(p=>{
-        if(!placeVisible(p)) return;
-        const pts=p.link.pts, q=pts[0];
+        if(!placeVisible(p) || !p.spurPts) return;
+        const pts=p.spurPts, q=pts[0];
         if(Math.max(p.x,q.x)<vx0 || Math.min(p.x,q.x)>vx1 || Math.max(p.y,q.y)<vy0 || Math.min(p.y,q.y)>vy1) return;
         for(let k=0;k<pts.length;k++) k===0 ? ctx.moveTo(pts[k].x,pts[k].y) : ctx.lineTo(pts[k].x,pts[k].y);
       });
@@ -1321,7 +1443,8 @@ export function initDriftline() {
       .forEach(n=>{
         const sx=n.x*scale+offsetX, sy=n.y*scale+offsetY;
         if(sx<-300 || sx>W+300 || sy<-100 || sy>H+100) return;
-        const w=ctx.measureText(n.name).width, x0=sx+(numbered && stopIds.has(n.id) ? 14 : 8), y1=sy-4;
+        let w=textWidths.get(n.name); if(w===undefined){ w=ctx.measureText(n.name).width; textWidths.set(n.name,w); }
+        const x0=sx+(numbered && stopIds.has(n.id) ? 14 : 8), y1=sy-4;
         const r={x0:x0-pad, x1:x0+w+pad, y0:y1-LABEL_PX-pad, y1:y1+pad};
         if(placed.some(p=> r.x0<p.x1 && r.x1>p.x0 && r.y0<p.y1 && r.y1>p.y0)) return;
         placed.push(r);
@@ -1340,6 +1463,18 @@ export function initDriftline() {
     }
     ctx.restore();
 
+
+    ctx.restore();
+  }
+
+
+  // you (the car) and the reports, on the overlay layer
+  function renderOverlay(){
+    octx.setTransform(dpr,0,0,dpr,0,0);
+    octx.clearRect(0,0,W,H);
+    const styles={ getPropertyValue:k=>colors[k]||'' };
+    octx.save(); octx.translate(offsetX,offsetY); octx.scale(scale,scale);
+    const zs = Math.max(1, scale/1.4);
     // hazards
     const beforeCount=hazards.length;
     hazards = hazards.filter(h=>Date.now()-h.t<20*60*1000);
@@ -1349,24 +1484,27 @@ export function initDriftline() {
     hazards.forEach(h=>{
       const pulse = reduceMotion?0:Math.sin(pulseT*3+h.t)*0.25+0.75;
       const col=styles.getPropertyValue(hazColors[h.type]).trim();
-      ctx.beginPath(); ctx.arc(h.x,h.y,hazR*2*pulse,0,Math.PI*2); ctx.fillStyle=col; ctx.globalAlpha=0.18; ctx.fill(); ctx.globalAlpha=1;
-      ctx.beginPath(); ctx.arc(h.x,h.y,hazR,0,Math.PI*2); ctx.fillStyle=col; ctx.fill();
-      ctx.lineWidth=1.4/scale; ctx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); ctx.stroke();
+      octx.beginPath(); octx.arc(h.x,h.y,hazR*2*pulse,0,Math.PI*2); octx.fillStyle=col; octx.globalAlpha=0.18; octx.fill(); octx.globalAlpha=1;
+      octx.beginPath(); octx.arc(h.x,h.y,hazR,0,Math.PI*2); octx.fillStyle=col; octx.fill();
+      octx.lineWidth=1.4/scale; octx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); octx.stroke();
+      if(h.heading!==undefined){                   // reported while driving: it only applies to that direction
+        octx.save(); octx.translate(h.x,h.y); octx.rotate(h.heading); octx.beginPath();
+        octx.moveTo(hazR*3.4,0); octx.lineTo(hazR*2.1,hazR*1.1); octx.lineTo(hazR*2.1,-hazR*1.1); octx.closePath(); octx.fillStyle=col; octx.fill(); octx.restore();
+      }
     });
 
     // the user (car) — always a red arrow, pointing in the current heading (idle heading defaults to north)
-    ctx.save(); ctx.translate(car.x,car.y); ctx.rotate(car.heading); ctx.scale(1/zs,1/zs);
+    octx.save(); octx.translate(car.x,car.y); octx.rotate(car.heading); octx.scale(1/zs,1/zs);
     if(!navActive){
       const pulse=reduceMotion?0:Math.sin(pulseT*2.4)*0.3+0.7;
-      ctx.beginPath(); ctx.arc(0,0,12*pulse,0,Math.PI*2); ctx.fillStyle=styles.getPropertyValue('--user').trim(); ctx.globalAlpha=0.22; ctx.fill(); ctx.globalAlpha=1;
+      octx.beginPath(); octx.arc(0,0,12*pulse,0,Math.PI*2); octx.fillStyle=styles.getPropertyValue('--user').trim(); octx.globalAlpha=0.22; octx.fill(); octx.globalAlpha=1;
     }
-    ctx.beginPath(); ctx.moveTo(11,0); ctx.lineTo(-7,6); ctx.lineTo(-3,0); ctx.lineTo(-7,-6); ctx.closePath();
-    ctx.fillStyle = styles.getPropertyValue('--user').trim();
-    ctx.fill();
-    ctx.lineWidth=1.6; ctx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); ctx.stroke();
-    ctx.restore();
-
-    ctx.restore();
+    octx.beginPath(); octx.moveTo(11,0); octx.lineTo(-7,6); octx.lineTo(-3,0); octx.lineTo(-7,-6); octx.closePath();
+    octx.fillStyle = styles.getPropertyValue('--user').trim();
+    octx.fill();
+    octx.lineWidth=1.6; octx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); octx.stroke();
+    octx.restore();
+    octx.restore();
   }
 
   // Test hook: only exists when a test sets window.__DRIFTLINE_DEBUG__ before starting the app.
@@ -1376,6 +1514,7 @@ export function initDriftline() {
       state:()=>({ navActive, legs:legs.length, animRunning, pathLen:currentPath?currentPath.length:0, legEndSeg:legEndSeg.slice(),
         searchMode, navStopK, navSegIdx, navFrac, curSpeed, curLimit, rerouteOffered:!!rerouteState.pending, scale }),
       chooseDestination, handlePick, planTrip, moveStop, removeStop, startNavigation, setStartAtWorld, setCarAtNode,
+      renderOnce:()=>{ const t0=performance.now(); render(); renderOverlay(); return performance.now()-t0; }, renderCount:()=>renderCount,
       addHazardAt, applyReroute, openCompare, setSetting, toggleFav, setSearchMode, cancelTrip, endNavigation,
     };
   }

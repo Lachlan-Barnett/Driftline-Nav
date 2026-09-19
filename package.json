@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "node --test \"tests/*.test.mjs\"",
     "shots": "node tests/visual/shots.mjs",
+    "perf": "node tests/visual/perf.mjs",
     "data:coast": "node scripts/fetch-coast.mjs",
     "data:places": "node scripts/fetch-places.mjs",
     "data:roads": "node scripts/fetch-roads.mjs",

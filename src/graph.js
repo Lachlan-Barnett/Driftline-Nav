@@ -43,6 +43,15 @@ export const SPEED = { highway: 100, rural: 100, outback: 100, access: 80, subur
 export function createGraph(data, settings = { builtUp: true, avoidReports: true }) {
   const nodes = data.towns.map(([name, lat, lon, rank], id) => ({ id, name, lat, lon, rank, ...proj(lat, lon) }));
   const NID = {}; nodes.forEach(n => NID[n.name] = n.id);
+  // Junctions: where roads that share a road out of a town fork (see scripts/fetch-roads.mjs). They are real
+  // nodes of the network, but not places: never drawn, labelled or searched (they are "virtual").
+  const jd = data.junctions || { junctions: [], replaced: [], pieces: [] };
+  const ID = { ...NID };
+  jd.junctions.forEach(([jid, lat, lon, near]) => {
+    const p = proj(lat, lon), id = nodes.length;
+    nodes.push({ id, name: 'Junction near ' + near, lat, lon, rank: 9, x: p.x, y: p.y, virtual: true, junction: true });
+    ID[jid] = id;
+  });
   const edges = [];
   const adj = new Map(); nodes.forEach(n => adj.set(n.id, []));
   let graphVersion = 0, delayVersion = 0;
@@ -64,12 +73,22 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     adj.get(e.a).push({ to: e.b, edgeIdx: i }); adj.get(e.b).push({ to: e.a, edgeIdx: i });
     return i;
   }
+  const replaced = new Set(jd.replaced), roadByKey = {};
+  data.roads.forEach(r => { roadByKey[r[0] + '|' + r[1]] = r; });
   data.roads.forEach(([a, b, type, name]) => {
+    if (replaced.has(a + '|' + b)) return;            // built from its pieces below
     const A = nodes[NID[a]], B = nodes[NID[b]];
     const shape = data.roadShapes[a + '|' + b];
     const pts = shape && shape.length > 1 ? shape.map(([lat, lon]) => proj(lat, lon)) : [A, B];
     pts[0] = { x: A.x, y: A.y }; pts[pts.length - 1] = { x: B.x, y: B.y }; // pin the ends to the town dots
     addEdge(finishEdge({ a: A.id, b: B.id, type, name, limit: data.speedLimits[a + '|' + b] }, pts));
+  });
+
+  jd.pieces.forEach(([from, to, shape, owner]) => {
+    const [, , type, name] = roadByKey[owner], A = nodes[ID[from]], B = nodes[ID[to]];
+    const pts = shape.map(([lat, lon]) => proj(lat, lon));
+    pts[0] = { x: A.x, y: A.y }; pts[pts.length - 1] = { x: B.x, y: B.y };
+    addEdge(finishEdge({ a: A.id, b: B.id, type, name, limit: data.speedLimits[owner] }, pts));
   });
 
   /* ---------- geometry along an edge ---------- */
@@ -89,6 +108,17 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     const p = pointAlong(e, forward, atEnd ? L - span : 0), q = pointAlong(e, forward, atEnd ? L : span);
     return Math.atan2(q.y - p.y, q.x - p.x);
   }
+  // nearest point of one edge to (x, y): { dist (along the edge from a), x, y, d }
+  function projectOnEdge(e, x, y) {
+    let best = null; const pts = e.pts;
+    for (let k = 1; k < pts.length; k++) {
+      const ax = pts[k - 1].x, ay = pts[k - 1].y, dx = pts[k].x - ax, dy = pts[k].y - ay, l = dx * dx + dy * dy;
+      let t = l > 0 ? ((x - ax) * dx + (y - ay) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
+      const px = ax + t * dx, py = ay + t * dy, d = Math.hypot(x - px, y - py);
+      if (!best || d < best.d) best = { dist: e.cum[k - 1] + t * Math.sqrt(l), x: px, y: py, d };
+    }
+    return best;
+  }
   // nearest point on any road to (x, y): { edgeIdx, dist (along the edge from a), x, y, d }
   function nearestRoadPoint(x, y) {
     let best = null;
@@ -96,13 +126,8 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
       if (e.removed) return;
       const m = best ? best.d : Infinity, bb = e.bbox;
       if (x < bb.x0 - m || x > bb.x1 + m || y < bb.y0 - m || y > bb.y1 + m) return;
-      const pts = e.pts;
-      for (let k = 1; k < pts.length; k++) {
-        const ax = pts[k - 1].x, ay = pts[k - 1].y, dx = pts[k].x - ax, dy = pts[k].y - ay, l = dx * dx + dy * dy;
-        let t = l > 0 ? ((x - ax) * dx + (y - ay) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
-        const px = ax + t * dx, py = ay + t * dy, d = Math.hypot(x - px, y - py);
-        if (!best || d < best.d) best = { edgeIdx: idx, dist: e.cum[k - 1] + t * Math.sqrt(l), x: px, y: py, d };
-      }
+      const h = projectOnEdge(e, x, y);
+      if (h && (!best || h.d < best.d)) best = { edgeIdx: idx, ...h };
     });
     return best;
   }
@@ -122,7 +147,7 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     e.removed = true;
     adj.set(e.a, adj.get(e.a).filter(l => l.edgeIdx !== edgeIdx));
     adj.set(e.b, adj.get(e.b).filter(l => l.edgeIdx !== edgeIdx));
-    const common = { type: e.type, name: e.name, limit: e.limit, delaySec: e.delaySec || 0 };
+    const common = { type: e.type, name: e.name, limit: e.limit, delayFwd: e.delayFwd || 0, delayBack: e.delayBack || 0 };
     addEdge(finishEdge({ a: e.a, b: node.id, ...common }, p1));
     addEdge(finishEdge({ a: node.id, b: e.b, ...common }, p2));
     graphVersion++;
@@ -135,7 +160,8 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
   const edgeKm = e => e.len * KM_PER_UNIT;
   // Travel time: the road's limit, slowed through built-up areas at each end, plus any delay from
   // reports on it. (Zones are capped at half the road so two of them never overlap.)
-  function edgeSeconds(e) {
+  // fwd = driving the edge from a to b (true), b to a (false); leave it out for "whichever is worse"
+  function edgeSeconds(e, fwd) {
     const km = edgeKm(e), base = edgeSpeed(e);
     let hours = km / base;
     if (settings.builtUp) {
@@ -144,7 +170,7 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
       hours = (km - ka - kb) / base + (za ? ka / Math.min(base, za.limit) : 0) + (zb ? kb / Math.min(base, zb.limit) : 0);
     }
     let s = hours * 3600;
-    if (settings.avoidReports && e.delaySec) s += e.delaySec;
+    if (settings.avoidReports) s += delayFor(e, fwd);
     return s;
   }
   // The speed limit at a point d map units along an edge, travelling forward or not (for the sign).
@@ -163,14 +189,27 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     const a = nodes[fromId], b = nodes[goalId];
     return Math.hypot(a.x - b.x, a.y - b.y) * KM_PER_UNIT / MAX_SPEED * 3600;
   }
-  // Put each report's delay on the road it sits on. Call whenever reports change.
+  // seconds a report adds to driving an edge a->b (fwd true), b->a (false), or (unknown) the worse of the two
+  function delayFor(e, fwd) {
+    if (fwd === undefined) return Math.max(e.delayFwd || 0, e.delayBack || 0);
+    return (fwd ? e.delayFwd : e.delayBack) || 0;
+  }
+  // Which way along an edge a report applies: the way it was reported travelling ('fwd' = a->b, 'back'),
+  // or 'both' when the direction is unknown (reported from the map, or while not driving).
+  function reportDirection(e, dist, heading) {
+    if (heading === undefined || heading === null) return 'both';
+    const tangent = pointAlong(e, true, dist).heading;
+    return Math.cos(heading - tangent) >= 0 ? 'fwd' : 'back';
+  }
+  // Put each report's delay on the road (and the direction of travel) it applies to. Call whenever reports change.
   function recomputeDelays(hazards) {
-    edges.forEach(e => { e.delaySec = 0; });
+    edges.forEach(e => { e.delayFwd = 0; e.delayBack = 0; });
     hazards.forEach(h => {
       const hit = nearestRoadPoint(h.x, h.y);
       if (!hit || hit.d > REPORT_SNAP_UNITS) return;
-      const e = edges[hit.edgeIdx];
-      e.delaySec = Math.min(DELAY_CAP_SEC, (e.delaySec || 0) + (DELAY_SEC[h.type] || 0));
+      const e = edges[hit.edgeIdx], add = DELAY_SEC[h.type] || 0, dir = reportDirection(e, hit.dist, h.heading);
+      if (dir !== 'back') e.delayFwd = Math.min(DELAY_CAP_SEC, (e.delayFwd || 0) + add);
+      if (dir !== 'fwd') e.delayBack = Math.min(DELAY_CAP_SEC, (e.delayBack || 0) + add);
     });
     delayVersion++;
   }
@@ -183,44 +222,44 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     const info = PLACE_KINDS[kind] || PLACE_KINDS.locality;
     return { index, name, lat, lon, kind, label: info.label, rank: info.rank, ...proj(lat, lon), nodeId: null, link: null };
   });
-  const linkRows = new Map(data.localRoads.map(r => [r[0], r]));
-  const parentOf = p => p.link.kind === 'node' ? nodes[p.link.idx] : places[p.link.idx];
+  // Each place joins the network where it really does: sitting on a main road (spur 0), or at the junction
+  // of a side road (spur = its real shape, or null for a straight one). See scripts/fetch-local-roads.mjs.
+  const accessRows = new Map(data.localRoads.map(r => [r[0], r]));
   places.forEach(p => {
-    const row = linkRows.get(p.index);
+    const row = accessRows.get(p.index);
     if (row && row[1] === p.name) {
-      const par = row[2];
-      const kind = typeof par === 'number' ? 'place' : 'node', idx = typeof par === 'number' ? par : NID[par];
-      if (idx !== undefined) p.link = { kind, idx, shape: row[3] };
+      const j = proj(row[2], row[3]);
+      p.attach = { x: j.x, y: j.y };
+      p.spur = row[4];                                           // 0 | null | [[lat, lon], ...]
+    } else { // no data for this place: hang it off the nearest road
+      const hit = nearestRoadPoint(p.x, p.y);
+      p.attach = hit ? { x: hit.x, y: hit.y } : { x: p.x, y: p.y };
+      p.spur = hit && hit.d < 0.5 ? 0 : null;
     }
-    if (!p.link) { // no usable link in the data: hang it off the nearest town with a straight road
-      let bi = 0, bd = Infinity;
-      nodes.forEach(n => { const d = (n.x - p.x) ** 2 + (n.y - p.y) ** 2; if (d < bd) { bd = d; bi = n.id; } });
-      p.link = { kind: 'node', idx: bi, shape: null };
-    }
-  });
-  places.forEach(p => {
-    const q = parentOf(p);
-    const pts = p.link.shape && p.link.shape.length > 1 ? p.link.shape.map(([lat, lon]) => proj(lat, lon)) : [q, p];
-    pts[0] = { x: q.x, y: q.y }; pts[pts.length - 1] = { x: p.x, y: p.y };
-    p.link.pts = pts;
+    // the side road from the junction to the place, in map units (nothing to draw for a place on the road)
+    p.spurPts = p.spur === 0 ? null
+      : (p.spur && p.spur.length > 1 ? p.spur.map(([lat, lon]) => proj(lat, lon)) : [p.attach, p]).map(q => ({ x: q.x, y: q.y }));
+    if (p.spurPts) { p.spurPts[0] = { x: p.attach.x, y: p.attach.y }; p.spurPts[p.spurPts.length - 1] = { x: p.x, y: p.y }; }
   });
 
-  // Extra places are not in the road graph until you pick one: it gets a node plus its local road,
-  // and so does every place on the chain of local roads leading back to a town.
+  // Extra places are not in the road graph until you pick one. A place on a road becomes that point of the
+  // road (the road is split there); a place off the road also gets its side road from the junction.
   function ensurePlaceNode(place) {
     if (place.nodeId !== null) return nodes[place.nodeId];
-    const chain = []; let cur = place;
-    while (cur && cur.nodeId === null) { chain.push(cur); cur = cur.link.kind === 'place' ? places[cur.link.idx] : null; }
-    for (let i = chain.length - 1; i >= 0; i--) {
-      const p = chain[i];
-      const parent = p.link.kind === 'node' ? nodes[p.link.idx] : nodes[places[p.link.idx].nodeId];
-      const node = { id: nodes.length, name: p.name, lat: p.lat, lon: p.lon, rank: p.rank, x: p.x, y: p.y, virtual: true, placeRef: p };
-      nodes.push(node); adj.set(node.id, []);
-      addEdge(finishEdge({ a: parent.id, b: node.id, type: 'access', name: 'Local roads to ' + p.name,
-        limit: p.kind === 'suburb' ? SPEED.suburb : SPEED.access, delaySec: 0 }, p.link.pts.map(q => ({ x: q.x, y: q.y }))));
-      p.nodeId = node.id;
+    const hit = nearestRoadPoint(place.attach.x, place.attach.y);
+    const anchor = hit ? splitEdgeAt(hit.edgeIdx, hit.dist) : nodes[nearestNodeTo(place.x, place.y)];
+    if (place.spur === 0) {
+      if (anchor.isPin) { anchor.name = place.name; anchor.isPin = false; anchor.placeRef = place; anchor.rank = place.rank; }
+      place.nodeId = anchor.id;
+      return anchor;
     }
-    return nodes[place.nodeId];
+    const node = { id: nodes.length, name: place.name, lat: place.lat, lon: place.lon, rank: place.rank, x: place.x, y: place.y, virtual: true, placeRef: place };
+    nodes.push(node); adj.set(node.id, []);
+    const pts = place.spurPts.map(q => ({ x: q.x, y: q.y })); pts[0] = { x: anchor.x, y: anchor.y };
+    addEdge(finishEdge({ a: anchor.id, b: node.id, type: 'access', name: 'Local roads to ' + place.name,
+      limit: place.kind === 'suburb' ? SPEED.suburb : SPEED.access }, pts));
+    place.nodeId = node.id;
+    return node;
   }
 
   function nearestNodeTo(x, y) {
@@ -238,7 +277,7 @@ export function createGraph(data, settings = { builtUp: true, avoidReports: true
     nodes, edges, adj, NID, places, LAND, settings,
     finishEdge, addEdge, pointAlong, edgeBearing, nearestRoadPoint, splitEdgeAt,
     edgeSpeed, edgeKm, edgeSeconds, limitAt, heuristicSeconds, recomputeDelays,
-    ensurePlaceNode, nearestNodeTo, nearestTownName, parentOf,
+    ensurePlaceNode, nearestNodeTo, nearestTownName, projectOnEdge, reportDirection, delayFor,
     graphVersion: () => graphVersion, delayVersion: () => delayVersion, MAX_SPEED,
   };
 }

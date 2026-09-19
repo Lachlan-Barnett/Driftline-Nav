@@ -7,12 +7,14 @@ after(() => closeHarness());
 
 const stopNames = app => app.dbg.trip.stops.map(s => s.poi.name);
 async function withApp(opts, fn) { const app = await startApp(opts); try { await fn(app); } finally { app.stop(); } }
-// Stack crashes (each road's delay is capped at 60 min) on the roads between two towns.
+// Stack crashes (each road's delay is capped at 60 min) on every road of the way between two towns.
 function blockRoad(app, a, b) {
   const g = app.dbg.graph;
-  const e = g.edges.find(x => { const n = new Set([g.nodes[x.a].name, g.nodes[x.b].name]); return n.has(a) && n.has(b); });
-  const mid = g.pointAlong(e, true, e.len / 2);
-  for (let i = 0; i < 3; i++) app.dbg.addHazardAt('crash', mid.x, mid.y);
+  const way = app.dbg.ALGS.dijkstra.fn(g.NID[a], g.NID[b]);
+  for (const seg of way.path) {
+    const e = g.edges[seg.edgeIdx], mid = g.pointAlong(e, true, e.len / 2);
+    for (let i = 0; i < 3; i++) app.dbg.addHazardAt('crash', mid.x, mid.y);
+  }
 }
 // Pick a destination the way a user would: type, click the first suggestion.
 function search(app, text, i = 0) { app.type(text); app.pickSuggestion(i); }
@@ -152,7 +154,7 @@ test('reports: a crash on the route adds a delay note; long-press reports land o
   const route = []; // find the actual first edge of the current path via the preview: report on Ipswich Motorway
   const ipswichMw = g.edges.find(e => e.name === 'Ipswich Motorway'), p = g.pointAlong(ipswichMw, true, ipswichMw.len / 2);
   app.dbg.addHazardAt('crash', p.x, p.y); app.advance(300); app.settle();
-  assert.ok(ipswichMw.delaySec >= 1500, 'delay put on the road');
+  assert.ok(Math.max(ipswichMw.delayFwd, ipswichMw.delayBack) >= 1500, 'delay put on the road');
   assert.ok(app.has('delayNote', 'show'), 'preview mentions the delay');
   assert.match(app.text('delayNote'), /delays from reports/);
   assert.equal(app.dbg.hazards().length, 1);
@@ -194,6 +196,63 @@ test('reports: turning off "offer reroutes" (or "avoid reports") stops the promp
   blockRoad(app, 'Laidley', 'Gatton'); blockRoad(app, 'Gatton', 'Toowoomba');
   app.advance(200);
   assert.ok(!app.dbg.state().rerouteOffered);
+}));
+
+test('reports: while driving, only reports ahead of you and in your direction count (not behind, not the other way)', () => withApp({}, app => {
+  const g = app.dbg.graph;
+  search(app, 'toowoomba'); app.settle();
+  const route = app.dbg.ALGS.dijkstra.fn(g.NID['Brisbane'], g.NID['Toowoomba']);
+  const seg = route.path[0], e = g.edges[seg.edgeIdx], fwd = seg.from === e.a;
+  const at = d => g.pointAlong(e, fwd, d);                       // d = distance from the start of the first road, as driven
+  const ahead = at(e.len * 0.8), inMyDirection = at(e.len * 0.8).heading;
+  app.click('startDrive'); app.advance(2500);                    // the car is now some way along the first road
+  const carAlong = g.projectOnEdge(e, app.dbg.car().x, app.dbg.car().y).dist;
+  const along = fwd ? carAlong : e.len - carAlong;
+  assert.ok(along > e.len * 0.02 && along < e.len * 0.6, 'the car should be part-way along the first road, got ' + along.toFixed(2) + ' of ' + e.len.toFixed(2));
+  const panelShown = () => { app.advance(50); return app.has('routeReportsPanel', 'show'); };
+  // 1. a report behind the car
+  const behind = at(along * 0.4);
+  app.dbg.addHazardAt('crash', behind.x, behind.y, behind.heading); app.advance(100);
+  assert.ok(!panelShown(), 'a report behind the car is not "ahead"');
+  app.click('adminBtn'); // (open the reports panel just to exercise it)
+  // 2. a report ahead but for the opposite direction of travel
+  app.dbg.addHazardAt('crash', ahead.x, ahead.y, inMyDirection + Math.PI); app.advance(100);
+  assert.ok(!panelShown(), 'a report for oncoming traffic is not on your side of the road');
+  // 3. a report ahead in your direction
+  app.dbg.addHazardAt('hazard', ahead.x, ahead.y, inMyDirection); app.advance(100);
+  assert.ok(panelShown(), 'a report ahead in your direction should be shown');
+  assert.match(app.html('routeReportsList'), /Hazard/);
+  assert.ok(!/Crash/.test(app.html('routeReportsList')), 'only the report that applies is listed');
+  // 4. no direction known (reported from the map): counts for both ways
+  app.dbg.addHazardAt('police', ahead.x, ahead.y, undefined); app.advance(100);
+  assert.match(app.html('routeReportsList'), /Police/);
+}));
+
+test('search: forgiving of case, abbreviations and typos; Enter picks the top result; arrows move', () => withApp({}, app => {
+  const top = q => { app.type(q); return (app.html('suggestBox').match(/suggestName">([^<]+)/) || [])[1]; };
+  assert.equal(top('MOUNT ISA'), 'Mount Isa');
+  assert.equal(top('mt isa'), 'Mount Isa', '"Mt" means Mount');
+  assert.equal(top('toowomba'), 'Toowoomba', 'one typo is forgiven');
+  assert.equal(top('  gold  coast '), 'Gold Coast');
+  assert.equal(top('st george'), 'St George');
+  assert.equal(top('jimboomba'), 'Jimboomba');
+  assert.match(app.html('suggestBox'), /near /, 'places show which town they are near');
+  // real towns outrank obscure localities that merely contain the letters
+  assert.equal(top('cairns'), 'Cairns');
+  // Enter picks the first result with no click
+  app.type('toowoomba');
+  app.fire('searchInput', 'keydown', { key: 'Enter' });
+  app.settle();
+  assert.deepEqual(app.dbg.trip.stops.map(s => s.poi.name), ['Toowoomba']);
+  // arrows move the highlight, then Enter picks that one
+  app.dbg.cancelTrip(); app.type('bris');
+  const first = (app.html('suggestBox').match(/suggestName">([^<]+)/g) || []).map(x => x.replace('suggestName">', ''));
+  app.fire('searchInput', 'keydown', { key: 'ArrowDown' });
+  assert.match(app.html('suggestBox'), /suggestItem active/);
+  app.fire('searchInput', 'keydown', { key: 'Enter' });
+  app.settle();
+  assert.equal(app.dbg.trip.stops[0].poi.name, first[1], 'the second suggestion was chosen');
+  app.dbg.cancelTrip(); app.type('zzzzqqq'); assert.ok(!app.has('suggestBox', 'show'), 'nothing matches, nothing shown');
 }));
 
 test('compare: every algorithm is listed, the best values are marked, Replay re-runs one', () => withApp({}, app => {

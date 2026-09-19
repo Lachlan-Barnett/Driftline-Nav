@@ -8,6 +8,51 @@ Branches on the remote: `main` and `node_line_search` carry the neon line search
 
 ---
 
+## Round 9: smoother, real junctions, places on their roads, reports by direction, better search
+
+### Fixed
+- **Places on a highway now sit on it.** Jimboomba (and hundreds like it) showed as "off to the side" and not
+  connected, because every place was hung off its nearest *neighbouring place*. Now each place is attached
+  to the **road itself**: if it is on a main road it becomes a stop *on that road* (the road is split
+  there, so driving through it is one continuous road). If it is off the road, it gets a real side road from
+  the junction where that side road leaves the main road. Brisbane → Jimboomba is now the Pacific
+  Motorway then the Mount Lindesay Highway, with Jimboomba on it.
+- **No more side-street chains.** Places no longer link to each other, so routes cannot wander across random
+  local roads when the highway is quicker, or go down a dead end and back to carry on.
+- **Roads that share a stretch fork at a real junction.** 67 junction nodes (`junctions.json`) cut roads that
+  share a stretch out of a town at the point they split, so a trip between two such roads turns off at the
+  fork instead of driving to the town and back (Weipa → Bamaga no longer goes via Coen). Junctions are
+  routing nodes only: never drawn, labelled or searched.
+- **Reports respect direction.** A report now remembers which way you were driving when you made it and only
+  slows that direction. While driving you are only told about a report that is **ahead of you, on your
+  route, in your direction of travel, and close to the road you are on**; one behind you, or for oncoming
+  traffic, no longer counts. A report made from the map (no direction) applies both ways. The report marker
+  shows a small arrow for its direction.
+
+### Changed
+- **Search is more forgiving.** Case, spacing and punctuation are ignored; abbreviations work (*Mt* → Mount, *St* → Saint,
+  *Pt*, *Ck*, *Hwy*, *Hts*, *Bch*, *Rd* …); one typo is forgiven (*toowomba*); real towns
+  rank above obscure localities that merely contain the letters; each place shows which town it is near.
+  **Enter** picks the top result; **↑ / ↓** move the highlight.
+- **Much less lag.** Idle CPU dropped from roughly 110–145% of a core to under 10%. The map is only redrawn
+  when something changed; **you and the reports are on their own transparent layer** so their pulse does
+  not redraw the whole map; all `backdrop-filter` blurs were removed; colours, road paths, text widths and
+  the land shape are cached between frames.
+- **`local-roads.json` has a new format**: for each place, the junction on the road network it attaches to and
+  the real shape of its side road (or `0` = on a main road, `null` = straight line). 693 places are on a
+  road, 3,250 have a shaped side road and 107 a straight one.
+- `fetch-local-roads.mjs` now routes each place to the road network and finds where it joins a main road;
+  `fetch-roads.mjs` also writes `junctions.json`.
+
+### Added
+- `npm run perf`: measures redraw time and idle CPU of the real app in a headless browser (`tests/visual/perf.mjs`).
+- Tests: 40 (was 33): places attach to roads (Jimboomba), junctions, direction-aware reports, search.
+
+### Removed
+- The place-to-place local road chains (`parent` links) and the "wire in the whole chain" behaviour.
+
+---
+
 ## Round 8: trips, start pins, speed signs, real coast, tests and data scripts
 
 ### Added

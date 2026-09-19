@@ -2,7 +2,7 @@
 // wires up all the interactivity with plain getElementById/querySelector calls.
 // (Lists such as suggestions, the trip stops and the settings rows are filled in by driftline.js.)
 export const markup = `
-<div id="stage"><canvas id="map"></canvas></div>
+<div id="stage"><canvas id="map"></canvas><canvas id="overlay"></canvas></div>
 
 <div id="topWrap">
   <div id="searchRow">

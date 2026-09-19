@@ -15,7 +15,7 @@ export function createAlgorithms(graph) {
     const path = []; let cur = endId;
     while (cur !== startId) { const pe = parent.get(cur); if (!pe) return null; path.unshift({ edgeIdx: pe.edgeIdx, from: pe.from, to: cur }); cur = pe.from; }
     let totalSec = 0, totalLen = 0;
-    path.forEach(seg => { const e = edges[seg.edgeIdx]; totalSec += edgeSeconds(e); totalLen += edgeKm(e); });
+    path.forEach(seg => { const e = edges[seg.edgeIdx]; totalSec += edgeSeconds(e, seg.from === e.a); totalLen += edgeKm(e); });
     const explored = new Set(); trace.forEach(t => { if (t.expand !== undefined) explored.add(t.expand); });
     return { path, trace, totalSec, totalLenKm: totalLen, nodesExplored: explored.size };
   }
@@ -76,7 +76,7 @@ export function createAlgorithms(graph) {
       visited.add(u); trace.push(expandStep(u, parent));
       if (u === endId) break;
       for (const link of adj.get(u)) {
-        const e = edges[link.edgeIdx], nd = dist.get(u) + edgeSeconds(e);
+        const e = edges[link.edgeIdx], nd = dist.get(u) + edgeSeconds(e, u === e.a);
         if (nd < dist.get(link.to)) { dist.set(link.to, nd); parent.set(link.to, { from: u, edgeIdx: link.edgeIdx }); }
       }
     }
@@ -95,7 +95,7 @@ export function createAlgorithms(graph) {
       visited.add(u); trace.push(expandStep(u, parent));
       if (u === endId) break;
       for (const link of adj.get(u)) {
-        const e = edges[link.edgeIdx], ng = g.get(u) + edgeSeconds(e);
+        const e = edges[link.edgeIdx], ng = g.get(u) + edgeSeconds(e, u === e.a);
         if (ng < g.get(link.to)) { g.set(link.to, ng); parent.set(link.to, { from: u, edgeIdx: link.edgeIdx }); }
       }
     }
@@ -117,7 +117,7 @@ export function createAlgorithms(graph) {
         const e = edges[link.edgeIdx];
         parent.set(link.to, { from: u, edgeIdx: link.edgeIdx });
         path.push(link.to);
-        const t = search(g + edgeSeconds(e), bound);
+        const t = search(g + edgeSeconds(e, u === e.a), bound);
         if (found) return -1;
         path.pop();
         if (t < min) min = t;
