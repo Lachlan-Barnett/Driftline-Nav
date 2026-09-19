@@ -30,6 +30,7 @@ export const markup = `
       <button class="algPill" data-alg="dijkstra">Dijkstra</button>
       <button class="algPill" data-alg="astar">A*</button>
       <button class="algPill" data-alg="ida">IDA*</button>
+      <button class="algPill" data-alg="wave">Wave</button>
     </div>
     <div id="algDesc">—</div>
     <div id="animateRow"><span>Animate the search</span><div class="switch on" id="animSwitch"></div></div>
@@ -40,7 +41,7 @@ export const markup = `
     <b>Features</b>
     <div id="featureList">
       <div class="featureRow"><div class="featureDot"></div>Search and drive to any of 190+ Queensland towns, plus 3,900+ suburbs, villages, hamlets and localities you can search or tap</div>
-      <div class="featureRow"><div class="featureDot"></div>Pick your routing algorithm — BFS, DFS, IDS, Dijkstra, A*, or IDA* — and watch it search the map live</div>
+      <div class="featureRow"><div class="featureDot"></div>Pick your routing algorithm — BFS, DFS, IDS, Dijkstra, A*, IDA* or Wave — and watch it search the map live</div>
       <div class="featureRow"><div class="featureDot"></div>Turn-by-turn directions with live speed, time and distance remaining, and arrival time</div>
       <div class="featureRow"><div class="featureDot"></div>Report police, hazards or crashes, and see what's on the way to your destination</div>
       <div class="featureRow"><div class="featureDot"></div>Manage reports — remove one, clear a type, or clear everything</div>

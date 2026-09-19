@@ -5,7 +5,7 @@
     --text:#EAF2FA; --muted:#8091AB; --panel:rgba(13,20,33,.9); --panel-2:rgba(20,29,46,.94);
     --panel-border:rgba(255,255,255,.08); --amber:#FFB020; --red:#FF4D5E; --blue:#3AA6FF;
     --river:#0E3A57; --border-line:rgba(255,255,255,.14);
-    --alg-bfs:#3AA6FF; --alg-dfs:#B98BFF; --alg-ids:#9FE066; --alg-dijkstra:#00E0C6; --alg-astar:#FF7BD1; --alg-ida:#FFA23A;
+    --alg-bfs:#3AA6FF; --alg-dfs:#B98BFF; --alg-ids:#9FE066; --alg-dijkstra:#00E0C6; --alg-astar:#FF7BD1; --alg-ida:#FFA23A; --alg-wave:#39FF14;
     --shadow: 0 10px 30px rgba(0,0,0,.45);
   }
   @media (prefers-color-scheme: dark){

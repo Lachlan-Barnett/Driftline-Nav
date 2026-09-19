@@ -2,7 +2,8 @@
 
 A Waze-style stylised navigation demo for Queensland, Australia: search and
 drive between towns, watch different pathfinding algorithms (BFS, DFS, IDS,
-Dijkstra, A*, IDA*) search the map live, get turn-by-turn directions, and
+Dijkstra, A*, IDA*, Wave) search the map live as glowing neon-green lines, get
+turn-by-turn directions, and
 report police/hazards/crashes along the way.
 
 ## Running it
@@ -30,7 +31,7 @@ any other React app, but it's worth knowing how it's structured underneath:
 - `src/markup.js` — the app's DOM structure (all the panels, buttons, the
   canvas element), lifted verbatim from the original page and injected once
   via `dangerouslySetInnerHTML` in `App.jsx`.
-- `src/driftline.js` — all of the app's behavior: the road network, the six
+- `src/driftline.js` — all of the app's behavior: the road network, the seven
   routing algorithms, the canvas rendering loop, drag/pinch/zoom handling,
   the reports system, preferences, everything. It's exported as a single
   `initDriftline()` function that wires itself up with ordinary
@@ -74,7 +75,7 @@ that map fairly directly onto what would become separate components/hooks.
   nearest neighbour by a local road (a minimum spanning tree grown outward
   from the towns), drawn as a dotted line. They're searchable and tappable, but
   only join the routing graph when picked: that adds the place and its chain of
-  local roads, so all six algorithms can route to it.
+  local roads, so all seven algorithms can route to it.
 - `src/data/speeds.json` holds a speed limit for every road, taken from the
   signed `maxspeed` values in OpenStreetMap (length-weighted most common limit
   along each road). Roads OSM has no limit for use Queensland's 100 km/h

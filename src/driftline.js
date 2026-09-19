@@ -524,6 +524,11 @@ export function initDriftline() {
   })();
 
   /* ============== ROUTE ALGORITHMS ============== */
+  // One trace step: town u was expanded, and (unless it is the start) the road it was reached by.
+  function expandStep(u,parent){
+    const pe=parent.get(u);
+    return pe ? { expand:u, from:pe.from, edgeIdx:pe.edgeIdx } : { expand:u };
+  }
   function buildResult(startId,endId,parent,trace){
     if(endId!==startId && !parent.has(endId)) return null;
     const path=[]; let cur=endId;
@@ -536,7 +541,7 @@ export function initDriftline() {
   function runBFS(startId,endId){
     const visited=new Set([startId]), parent=new Map(), trace=[], queue=[startId];
     while(queue.length){
-      const u=queue.shift(); trace.push({expand:u});
+      const u=queue.shift(); trace.push(expandStep(u,parent));
       if(u===endId) break;
       for(const link of adj.get(u)){ if(!visited.has(link.to)){ visited.add(link.to); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); queue.push(link.to); } }
     }
@@ -545,7 +550,7 @@ export function initDriftline() {
   function runDFS(startId,endId){
     const visited=new Set(), parent=new Map(), trace=[]; let found=false;
     function dfs(u){
-      visited.add(u); trace.push({expand:u});
+      visited.add(u); trace.push(expandStep(u,parent));
       if(u===endId) return true;
       for(const link of adj.get(u)){
         if(found) return true;
@@ -559,7 +564,7 @@ export function initDriftline() {
   function runIDS(startId,endId){
     const trace=[]; const parent=new Map(); let found=false;
     function dls(u, path, depth, limit){
-      trace.push({expand:u});
+      trace.push(expandStep(u,parent));
       if(u===endId){ found=true; return true; }
       if(depth>=limit) return false;
       for(const link of adj.get(u)){
@@ -586,7 +591,7 @@ export function initDriftline() {
       let u=-1,best=Infinity;
       for(const n of nodes) if(!visited.has(n.id) && dist.get(n.id)<best){ best=dist.get(n.id); u=n.id; }
       if(u===-1) break;
-      visited.add(u); trace.push({expand:u});
+      visited.add(u); trace.push(expandStep(u,parent));
       if(u===endId) break;
       for(const link of adj.get(u)){
         const e=edges[link.edgeIdx], nd=dist.get(u)+edgeSeconds(e);
@@ -603,7 +608,7 @@ export function initDriftline() {
       for(const n of nodes){ if(visited.has(n.id) || g.get(n.id)===Infinity) continue;
         const f=g.get(n.id)+heuristicSeconds(n.id,endId); if(f<best){best=f;u=n.id;} }
       if(u===-1) break;
-      visited.add(u); trace.push({expand:u});
+      visited.add(u); trace.push(expandStep(u,parent));
       if(u===endId) break;
       for(const link of adj.get(u)){
         const e=edges[link.edgeIdx], ng=g.get(u)+edgeSeconds(e);
@@ -619,7 +624,7 @@ export function initDriftline() {
     function search(g,bound){
       const u=path[path.length-1];
       const f=g+heuristicSeconds(u,endId);
-      trace.push({expand:u});
+      trace.push(expandStep(u,parent));
       if(f>bound) return f;
       if(u===endId){ found=true; return -1; }
       let min=Infinity;
@@ -645,12 +650,46 @@ export function initDriftline() {
     }
     return buildResult(startId,endId,parent,trace);
   }
+  function runWave(startId,endId){
+    // A flood: the search spreads outward from the start along every road at once, all at the same
+    // speed (distance, not travel time), until the first wave front reaches the destination.
+    const dist=new Map(), parent=new Map(), settled=new Set(), order=[];
+    nodes.forEach(n=>dist.set(n.id,Infinity)); dist.set(startId,0);
+    while(true){
+      let u=-1,best=Infinity;
+      for(const n of nodes) if(!settled.has(n.id) && dist.get(n.id)<best){ best=dist.get(n.id); u=n.id; }
+      if(u===-1) break;
+      settled.add(u); order.push(u);
+      if(u===endId) break;
+      for(const link of adj.get(u)){
+        const nd=dist.get(u)+edges[link.edgeIdx].len;
+        if(nd<dist.get(link.to)){ dist.set(link.to,nd); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); }
+      }
+    }
+    if(!settled.has(endId)) return null;
+    const T=dist.get(endId);
+    // Each road is grown from both ends by the fronts that reach it; two fronts stop where they
+    // meet. s0 = when a front enters the road, s1 = when it stops (all in distance units).
+    const segs=[];
+    order.forEach(u=>{
+      const du=dist.get(u);
+      adj.get(u).forEach(link=>{
+        const e=edges[link.edgeIdx], v=link.to;
+        const stop = settled.has(v) ? Math.min((e.len+du+dist.get(v))/2, T) : Math.min(du+e.len, T);
+        if(stop>du) segs.push({ edgeIdx:link.edgeIdx, fwd:e.a===u, s0:du, s1:stop });
+      });
+    });
+    const result=buildResult(startId,endId,parent,order.map(u=>expandStep(u,parent)));
+    if(result) result.wave={ segs, T };
+    return result;
+  }
   const ALGS = {
     bfs:{fn:runBFS, label:"BFS", color:"--alg-bfs", desc:"Explores outward in equal steps, ignoring speed limits — finds the route with the fewest towns, not the fastest one."},
     dfs:{fn:runDFS, label:"DFS", color:"--alg-dfs", desc:"Commits to one direction and only backtracks at dead ends — gets you there, but rarely by a sensible way."},
     ids:{fn:runIDS, label:"IDS", color:"--alg-ids", desc:"DFS re-run from scratch with the depth limit raised by one each pass — finds the same fewest-towns route as BFS, using barely any memory."},
     dijkstra:{fn:runDijkstra, label:"Dijkstra", color:"--alg-dijkstra", desc:"Always finds the fastest route by travel time, expanding the whole map evenly outward from the start."},
     astar:{fn:runAStar, label:"A*", color:"--alg-astar", desc:"Same optimal answer as Dijkstra, but a straight-line estimate to the destination steers the search there faster."},
+    wave:{fn:runWave, label:"Wave", color:"--alg-wave", desc:"Floods outward from the start along every road at once, at the same speed everywhere — the first wave to reach the destination has found the shortest route by distance, though not always the fastest."},
     ida:{fn:runIDAStar, label:"IDA*", color:"--alg-ida", desc:"A* logic run as repeated shallow dives with a rising cutoff — slower to watch, but barely any memory needed."},
   };
 
@@ -1168,26 +1207,45 @@ export function initDriftline() {
     }
 
     if(animateSearch && result.trace.length>1){
-      playSearchAnimation(result.trace, alg.color, settle);
+      playSearchAnimation(result.trace, alg.color, settle, result.wave);
     } else {
       settle();
     }
   }
 
-  function playSearchAnimation(trace, colorVar, onDone){
+  // Neon-green search lines. Step algorithms grow the road each expanded town was reached by; Wave
+  // grows every road at once, driven by a shared clock (simT) instead of by trace steps.
+  const NEON = '#39FF14';
+  function playSearchAnimation(trace, colorVar, onDone, wave){
     if(searchTimer) clearInterval(searchTimer);
-    searchAnim = { seen:new Set(), current:-1, colorVar };
+    searchAnim = { segs:new Map(), wave:null, done:false, endAt:0 };
+    const finish = ()=>{ clearInterval(searchTimer); searchTimer=null; searchAnim.done=true; onDone(); };
+    if(wave){
+      const durMs = 4200;
+      wave.segs.forEach((seg,i)=> searchAnim.segs.set(i, seg));
+      searchAnim.wave = { T:wave.T, startMs:performance.now(), durMs };
+      searchTimer = setInterval(()=>{ if(performance.now()-searchAnim.wave.startMs >= durMs+250) finish(); }, 50);
+      return;
+    }
     let idx=0;
     const stepMs = Math.max(20, Math.min(140, 2600/trace.length));
+    const growMs = Math.max(300, Math.min(800, stepMs*5)); // how long each road takes to light up
     // Deep searches (IDS / IDA*) can revisit towns thousands of times on a map this size, so
     // play several trace steps per tick to keep the whole animation to a few seconds.
     const perTick = Math.max(1, Math.ceil(trace.length*stepMs/3200));
     searchTimer = setInterval(()=>{
-      if(idx>=trace.length){ clearInterval(searchTimer); searchTimer=null; onDone(); return; }
+      if(idx>=trace.length){
+        if(!searchAnim.endAt) searchAnim.endAt = performance.now()+growMs; // let the last roads finish growing
+        if(performance.now()>=searchAnim.endAt) finish();
+        return;
+      }
       let lastPass=null;
       for(let k=0; k<perTick && idx<trace.length; k++, idx++){
         const step = trace[idx];
-        if(step.expand!==undefined){ searchAnim.seen.add(step.expand); searchAnim.current=step.expand; }
+        if(step.edgeIdx!==undefined){
+          const fwd = edges[step.edgeIdx].a===step.from, key = step.edgeIdx*2+(fwd?1:0);
+          if(!searchAnim.segs.has(key)) searchAnim.segs.set(key, { edgeIdx:step.edgeIdx, fwd, t0:performance.now(), dur:growMs });
+        }
         if(step.iterationEnd) lastPass=step;
       }
       if(lastPass){
@@ -1195,6 +1253,20 @@ export function initDriftline() {
         else if(lastPass.depth!==undefined) showToast('New IDS pass · depth limit '+lastPass.depth);
       }
     }, stepMs);
+  }
+  // add the first `dist` (world units) of edge e, travelling forward (a->b) or not, to the current path
+  function tracePartial(e, forward, dist){
+    const pts=e.pts, cum=e.cum, n=pts.length;
+    const at=k=> pts[forward?k:n-1-k];
+    const cumAt=k=> forward ? cum[k] : e.len-cum[n-1-k];
+    ctx.moveTo(at(0).x, at(0).y);
+    for(let k=1;k<n;k++){
+      const p=at(k), c=cumAt(k);
+      if(c<=dist){ ctx.lineTo(p.x,p.y); continue; }
+      const q=at(k-1), c0=cumAt(k-1), u=(dist-c0)/(c-c0);
+      ctx.lineTo(q.x+(p.x-q.x)*u, q.y+(p.y-q.y)*u);
+      return;
+    }
   }
 
   function closePreview(){
@@ -1366,25 +1438,29 @@ export function initDriftline() {
       });
     });
 
-    // search visualization
+    // search visualization: neon lines growing out along the roads being searched
     if(searchAnim){
-      const col = styles.getPropertyValue(searchAnim.colorVar).trim();
-      searchAnim.seen.forEach(id=>{
-        if(id===searchAnim.current) return;
-        const n=nodes[id];
-        ctx.beginPath(); ctx.arc(n.x,n.y, 6/zs, 0, Math.PI*2);
-        ctx.fillStyle=col; ctx.globalAlpha=0.35; ctx.fill(); ctx.globalAlpha=1;
+      const now=performance.now(), wv=searchAnim.wave;
+      const simT = wv ? Math.min(wv.T, (now-wv.startMs)/wv.durMs*wv.T) : 0;
+      const grown=[];
+      searchAnim.segs.forEach(seg=>{
+        const e=edges[seg.edgeIdx], bb=e.bbox;
+        if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
+        const d = wv ? Math.max(0, Math.min(simT, seg.s1)-seg.s0)
+                     : Math.max(0, Math.min(1, (now-seg.t0)/seg.dur))*e.len;
+        if(d>0) grown.push([e, seg.fwd, d]);
       });
-      if(searchAnim.current>=0){
-        const n=nodes[searchAnim.current];
-        ctx.beginPath(); ctx.arc(n.x,n.y, 10/zs, 0, Math.PI*2);
-        ctx.fillStyle=col; ctx.globalAlpha=0.95; ctx.fill(); ctx.globalAlpha=1;
-        ctx.lineWidth=2/zs; ctx.strokeStyle=col; ctx.globalAlpha=0.5; ctx.beginPath(); ctx.arc(n.x,n.y,16/zs,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha=1;
-      }
+      const pass=(w, style, alpha)=>{
+        ctx.beginPath(); grown.forEach(([e,fwd,d])=>tracePartial(e,fwd,d));
+        ctx.lineWidth=w/zs; ctx.strokeStyle=style; ctx.lineCap='round'; ctx.lineJoin='round';
+        ctx.globalAlpha = alpha*(searchAnim.done ? 0.45 : 1); ctx.stroke();
+      };
+      pass(11, NEON, 0.16); pass(5.5, NEON, 0.5); pass(2, '#D9FFD0', 1); // glow, body, hot core
+      ctx.globalAlpha=1;
     }
 
     // final route
-    if(currentPath && !searchAnim){
+    if(currentPath && (!searchAnim || searchAnim.done)){
       ctx.beginPath();
       let started=false;
       currentPath.forEach(seg=>{
@@ -1428,21 +1504,27 @@ export function initDriftline() {
     const onPath = new Set();
     if(currentPath) currentPath.forEach(seg=>{ onPath.add(seg.from); onPath.add(seg.to); });
     const priority = n=> (n.id!==undefined && currentDestination && currentDestination.id===n.id) ? 0 : (n.id!==undefined && onPath.has(n.id)) ? 1 : 1+n.rank;
-    const labelPx = 12/scale; // constant 12px on screen regardless of zoom
-    ctx.font='600 '+labelPx.toFixed(1)+'px "Space Grotesk", sans-serif';
+    // Labels are drawn in screen pixels, not map units: a font sized as 12/scale rounds to 0px at
+    // extreme zoom, which is what made every name vanish at max zoom.
+    const LABEL_PX=12;
+    ctx.save(); ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.font='600 '+LABEL_PX+'px "Space Grotesk", sans-serif';
     ctx.fillStyle=textCol; ctx.textBaseline='bottom';
-    const pad=3/scale, placed=[];
+    const pad=3, placed=[];
     const candidates = nodes.filter(n=> (!n.virtual || isDestNode(n)) && (priority(n)<=1 || scale>=LABEL_MIN_SCALE[n.rank]))
       .concat(places.filter(p=> scale>=LABEL_MIN_SCALE[p.rank] && inView(p) && !(p.nodeId!==null && isDestNode(nodes[p.nodeId]))));
     candidates
       .sort((a,b)=>priority(a)-priority(b))
       .forEach(n=>{
-        const w=ctx.measureText(n.name).width, x0=n.x+8/scale, y1=n.y-4/scale;
-        const r={x0:x0-pad, x1:x0+w+pad, y0:y1-labelPx-pad, y1:y1+pad};
+        const sx=n.x*scale+offsetX, sy=n.y*scale+offsetY;
+        if(sx<-300 || sx>W+300 || sy<-100 || sy>H+100) return;
+        const w=ctx.measureText(n.name).width, x0=sx+8, y1=sy-4;
+        const r={x0:x0-pad, x1:x0+w+pad, y0:y1-LABEL_PX-pad, y1:y1+pad};
         if(placed.some(p=> r.x0<p.x1 && r.x1>p.x0 && r.y0<p.y1 && r.y1>p.y0)) return;
         placed.push(r);
         ctx.fillText(n.name, x0, y1);
       });
+    ctx.restore();
 
     // hazards
     hazards = hazards.filter(h=>Date.now()-h.t<20*60*1000);
