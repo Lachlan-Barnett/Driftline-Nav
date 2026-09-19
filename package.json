@@ -6,7 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "shots": "node tests/visual/shots.mjs",
+    "data:coast": "node scripts/fetch-coast.mjs",
+    "data:places": "node scripts/fetch-places.mjs",
+    "data:roads": "node scripts/fetch-roads.mjs",
+    "data:speeds": "node scripts/fetch-speeds.mjs",
+    "data:local-roads": "node scripts/fetch-local-roads.mjs",
+    "data:all": "node scripts/data-all.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

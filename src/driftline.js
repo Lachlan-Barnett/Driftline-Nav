@@ -1,700 +1,64 @@
-// Real-world data pulled from OpenStreetMap (© OpenStreetMap contributors, ODbL):
-//  - places.json: extra named towns/villages/hamlets, [name, lat, lon, rank]
-//  - speeds.json: signed speed limit per road, keyed "TownA|TownB"
-//  - roads.json: the real driving route of each road as [lat, lon] points, same keys
+// Driftline: everything the app does in the browser. The map data and routing live in
+// graph.js / algorithms.js (pure, tested without a browser); this file is the interface on top:
+// canvas drawing, camera, search, trip planner, navigation, reports, settings.
+//
+// Real-world data from OpenStreetMap (© OpenStreetMap contributors, ODbL), built by scripts/:
+//   places.json      extra named places, [name, lat, lon, kind]
+//   local-roads.json the local road linking each of those places in, with its real shape
+//   roads.json       the real driving shape of each road in network.js
+//   speeds.json      the signed speed limit of each road
+//   coast.json       the real coastline (mainland + islands)
 import PLACE_DATA from './data/places.json';
+import LOCAL_ROADS from './data/local-roads.json';
 import SPEED_LIMITS from './data/speeds.json';
 import ROAD_SHAPES from './data/roads.json';
+import COAST from './data/coast.json';
+import { TOWNS, ROADS } from './data/network.js';
+import { WORLD_W, WORLD_H, KM_PER_UNIT } from './projection.js';
+import { createGraph } from './graph.js';
+import { createAlgorithms } from './algorithms.js';
 
 export function initDriftline() {
   let rafId = null;
   const cleanupFns = [];
   try{
   const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-  /* ============== PROJECTION ============== */
-  // WORLD_W/WORLD_H keep the true aspect ratio at Queensland's latitudes (1° of longitude is
-  // ~0.93 the length of 1° of latitude here), and KM_PER_UNIT follows from that scale.
-  const LON_W=137, LON_E=154, LAT_N=-10, LAT_S=-29.5;
-  const WORLD_W=970, WORLD_H=1200, KM_PER_UNIT=1.8, MAX_SPEED=110;
-  function proj(lat,lon){
-    return { x:(lon-LON_W)/(LON_E-LON_W)*WORLD_W, y:(lat-LAT_N)/(LAT_S-LAT_N)*WORLD_H };
+  /* ============== PREFERENCES + SETTINGS (persisted per-browser) ============== */
+  function loadPrefs(){
+    try{ const raw=localStorage.getItem('driftline_qld_prefs'); if(raw) return JSON.parse(raw); }catch(err){}
+    return {};
   }
-
-  /* ============== TOWNS (nodes) ============== */
-  // [name, lat, lon, rank] — rank 1 = major city (label always shown), 2 = regional centre
-  // (label once zoomed in a little), 3 = small town (label once zoomed in further).
-  const TOWN_DATA = [
-    // Cape York & Gulf
-    ["Bamaga",-10.89,142.39,3],["Weipa",-12.6387,141.8711,2],["Lockhart River",-12.7853,143.3425,3],["Aurukun",-13.3561,141.7267,3],
-    ["Coen",-13.9446,143.1997,3],["Laura",-15.5613,144.4469,3],["Lakeland",-15.8609,144.8579,3],["Cooktown",-15.4727,145.2534,2],
-    ["Normanton",-17.67,141.08,3],["Karumba",-17.4876,140.8404,3],["Burketown",-17.7401,139.5465,3],["Doomadgee",-17.9424,138.8278,3],
-    ["Croydon",-18.2043,142.2448,3],["Georgetown",-18.29,143.55,3],["Mount Surprise",-18.1456,144.3183,3],
-    // Far North / Tablelands / Wet Tropics
-    ["Port Douglas",-16.4846,145.4636,3],["Cairns",-16.92,145.77,1],["Mareeba",-16.9932,145.4224,2],["Chillagoe",-17.1541,144.5232,3],
-    ["Atherton",-17.2667,145.4769,3],["Innisfail",-17.5242,146.0311,3],["Ravenshoe",-17.6063,145.4825,3],["Tully",-17.9340,145.9232,3],
-    ["Cardwell",-18.2684,146.0300,3],["Ingham",-18.65,146.16,2],
-    // North Queensland
-    ["Townsville",-19.2569,146.8240,1],["Ayr",-19.5759,147.4045,3],["Charters Towers",-20.0714,146.2710,2],["Hughenden",-20.8422,144.2003,3],
-    ["Richmond",-20.73,143.14,3],["Julia Creek",-20.6568,141.7451,3],["Cloncurry",-20.7052,140.5058,2],["Mount Isa",-20.7290,139.4932,1],
-    ["Camooweal",-19.92,138.12,3],["Dajarra",-21.6947,139.5140,3],["Kynuna",-21.5796,141.9217,3],
-    // Whitsundays / Mackay / Bowen Basin
-    ["Bowen",-20.0121,148.2463,2],["Collinsville",-20.5527,147.8433,3],["Proserpine",-20.4018,148.5832,3],["Airlie Beach",-20.27,148.72,3],
-    ["Mackay",-21.1420,149.1865,1],["Sarina",-21.4186,149.2183,3],["Nebo",-21.69,148.69,3],["Moranbah",-22.0030,148.0433,3],
-    ["Dysart",-22.5880,148.3493,3],["Clermont",-22.8247,147.6403,3],["Capella",-23.0841,148.0229,3],["Emerald",-23.5263,148.1619,2],
-    ["Blackwater",-23.5812,148.8832,3],
-    // Capricorn / Central Queensland
-    ["Rockhampton",-23.3782,150.5134,1],["Yeppoon",-23.1348,150.7437,3],["Mount Morgan",-23.6451,150.3883,3],["Gladstone",-23.8432,151.2561,1],
-    ["Biloela",-24.3998,150.5142,3],["Springsure",-24.1171,148.0881,3],["Theodore",-24.9470,150.0760,3],["Miriam Vale",-24.33,151.56,3],
-    ["Agnes Water",-24.2123,151.9030,3],["Gin Gin",-24.9928,151.9572,3],["Monto",-24.8639,151.1224,3],
-    // Wide Bay / Burnett
-    ["Bundaberg",-24.8653,152.3517,1],["Childers",-25.2345,152.2768,3],["Gayndah",-25.6246,151.6084,3],["Maryborough",-25.5376,152.7019,2],
-    ["Hervey Bay",-25.2986,152.8535,2],["Tin Can Bay",-25.9149,153.0014,3],["Gympie",-26.1900,152.6600,2],["Noosa",-26.39,153.09,3],
-    ["Kingaroy",-26.54,151.84,2],
-    // South East Queensland
-    ["Sunshine Coast",-26.6544,153.0934,1],["Caboolture",-27.0839,152.9511,3],["Redcliffe",-27.2269,153.1130,3],["Brisbane",-27.4690,153.0235,1],
-    ["Ipswich",-27.6160,152.7608,2],["Gold Coast",-28.0024,153.4146,1],["Beaudesert",-27.9886,152.9961,3],["Gatton",-27.56,152.28,3],
-    ["Toowoomba",-27.5610,151.9534,1],["Warwick",-28.2163,152.0327,2],["Stanthorpe",-28.6560,151.9338,3],["Inglewood",-28.4160,151.0805,3],
-    // Darling Downs / Maranoa / South West
-    ["Goondiwindi",-28.5472,150.3074,2],["Dalby",-27.1823,151.2634,2],["Chinchilla",-26.7417,150.6225,3],["Miles",-26.6597,150.1856,3],
-    ["Wandoan",-26.1230,149.9611,3],["Taroom",-25.64,149.80,3],["Roma",-26.5710,148.7868,2],["Injune",-25.8432,148.5662,3],
-    ["Surat",-27.15,149.07,3],["St George",-28.0367,148.5808,2],["Dirranbandi",-28.5842,148.2289,3],["Bollon",-28.0318,147.4780,3],
-    ["Cunnamulla",-28.0707,145.6839,2],["Charleville",-26.4063,146.2420,2],["Mitchell",-26.4872,147.9767,3],["Augathella",-25.7969,146.5892,3],
-    ["Quilpie",-26.6153,144.2696,3],["Eromanga",-26.6675,143.2706,3],["Thargomindah",-27.9960,143.8204,3],
-    // Channel Country / Central West
-    ["Windorah",-25.4205,142.6548,3],["Birdsville",-25.8981,139.3523,3],["Bedourie",-24.3596,139.4702,3],["Boulia",-22.9103,139.9108,3],
-    ["Winton",-22.3845,143.0365,2],["Jundah",-24.8334,143.0618,3],["Longreach",-23.4378,144.2587,2],["Barcaldine",-23.5552,145.2873,3],
-    ["Aramac",-22.9710,145.2439,3],["Jericho",-23.6036,146.1242,3],["Alpha",-23.65,146.64,3],["Blackall",-24.4232,145.4648,3],
-    ["Tambo",-24.8831,146.2533,3],
-    // Smaller towns (rank 4)
-    ["Kowanyama",-15.4762,141.7466,4],
-    ["Mossman",-16.4614,145.3727,4],
-    ["Kuranda",-16.8209,145.6333,4],
-    ["Mount Molloy",-16.6755,145.3301,4],
-    ["Gordonvale",-17.0968,145.7744,4],
-    ["Babinda",-17.3442,145.9234,4],
-    ["Malanda",-17.3528,145.5959,4],
-    ["Millaa Millaa",-17.5117,145.6138,4],
-    ["Herberton",-17.3835,145.3854,4],
-    ["Mount Garnet",-17.6755,145.1126,4],
-    ["Dimbulah",-17.15,145.11,4],
-    ["Hope Vale",-15.2948,145.1117,4],
-    ["Musgrave",-14.78,143.5,4],
-    ["Forsayth",-18.5873,143.6029,4],
-    ["Giru",-19.5147,147.1054,4],
-    ["Home Hill",-19.6642,147.4140,4],
-    ["Glenden",-21.3596,148.1145,4],
-    ["Carmila",-21.9087,149.4112,4],
-    ["Marlborough",-22.8135,149.8895,4],
-    ["Dingo",-23.6460,149.3310,4],
-    ["Duaringa",-23.7212,149.6689,4],
-    ["Rolleston",-24.4635,148.6229,4],
-    ["Banana",-24.47,150.13,4],
-    ["Moura",-24.5674,149.9747,4],
-    ["Calliope",-24.0059,151.2001,4],
-    ["Mount Larcom",-23.8111,150.9796,4],
-    ["Eidsvold",-25.3712,151.1228,4],
-    ["Mundubbera",-25.59,151.3,4],
-    ["Goomeri",-26.1825,152.0678,4],
-    ["Murgon",-26.2407,151.9402,4],
-    ["Wondai",-26.3187,151.8738,4],
-    ["Nanango",-26.6726,152.0030,4],
-    ["Yarraman",-26.8411,151.9811,4],
-    ["Crows Nest",-27.2613,152.0555,4],
-    ["Blackbutt",-26.8830,152.1031,4],
-    ["Kilcoy",-26.9431,152.5654,4],
-    ["Woodford",-26.9547,152.7777,4],
-    ["Esk",-27.24,152.42,4],
-    ["Toogoolawah",-27.0871,152.3779,4],
-    ["Lowood",-27.4623,152.5805,4],
-    ["Laidley",-27.6307,152.3942,4],
-    ["Boonah",-27.9969,152.6820,4],
-    ["Rathdowney",-28.2111,152.8650,4],
-    ["Canungra",-28.0171,153.1653,4],
-    ["Oakey",-27.4360,151.7189,4],
-    ["Pittsworth",-27.7199,151.6345,4],
-    ["Millmerran",-27.8760,151.2701,4],
-    ["Clifton",-27.9300,151.9058,4],
-    ["Allora",-28.0342,151.9833,4],
-    ["Killarney",-28.3354,152.2957,4],
-    ["Tara",-27.2769,150.4570,4],
-    ["Moonie",-27.7172,150.3704,4],
-    ["Yelarbon",-28.5722,150.7529,4],
-    ["Wallumbilla",-26.5844,149.1872,4],
-    ["Yuleba",-26.6141,149.3845,4],
-    ["Morven",-26.4158,147.1149,4],
-    ["Wyandra",-27.2466,145.9777,4],
-    ["Eulo",-28.1617,145.0468,4],
-    ["Adavale",-25.91,144.6,4],
-    ["Isisford",-24.26,144.44,4],
-    ["Muttaburra",-22.5945,144.5479,4],
-    ["Ilfracombe",-23.4904,144.5046,4],
-    ["McKinlay",-21.27,141.29,4],
-    ["Pentland",-20.5236,145.3993,4],
-    ["Torrens Creek",-20.7690,145.0206,4],
-    ["Gregory Downs",-18.64,138.84,4],
-    ["Urandangi",-21.6094,138.3173,4],
-    ["Betoota",-25.63,140.74,4],
-    ["Stonehenge",-24.3528,143.2853,4],
-    ["Noccundra",-27.8175,142.5884,4],
-    ["Bogantungan",-23.6478,147.2902,4],
-    ["Anakie",-23.5523,147.7469,4],
-    ["Comet",-23.6045,148.5456,4],
-    ["Tieri",-23.0358,148.3448,4],
-    ["Middlemount",-22.81,148.7,4],
-    ["Tiaro",-25.7273,152.5828,4],
-    ["Cooroy",-26.42,152.91,4],
-    ["Nambour",-26.6257,152.9600,4],
-    ["Landsborough",-26.8091,152.9648,4],
-    ["Maleny",-26.7586,152.8531,4],
-    ["Emu Park",-23.2668,150.8202,4],
-    ["Mount Perry",-25.1813,151.6454,4],
+  function savePrefs(patch){
+    try{ const cur=loadPrefs(); localStorage.setItem('driftline_qld_prefs', JSON.stringify(Object.assign(cur, patch))); }catch(err){}
+  }
+  const prefs = loadPrefs();
+  const SETTING_DEFS = [
+    { key:'speedSigns',    label:'Speed limit signs',                  def:true },
+    { key:'builtUp',       label:'Slower speeds in built-up areas',    def:true },
+    { key:'avoidReports',  label:'Avoid reports when routing',         def:true },
+    { key:'offerReroute',  label:'Offer reroutes while driving',       def:true },
+    { key:'showPlaces',    label:'Show suburbs, villages & local roads', def:true },
+    { key:'animate',       label:'Animate the search',                 def:true },
   ];
-  const nodes = TOWN_DATA.map(([name,lat,lon,rank],id)=>{
-    const p = proj(lat,lon);
-    return { id, name, lat, lon, rank, x:p.x, y:p.y };
+  const settings = {};
+  SETTING_DEFS.forEach(d=>{
+    const saved = prefs.settings && prefs.settings[d.key];
+    settings[d.key] = typeof saved==='boolean' ? saved
+      : (d.key==='animate' && typeof prefs.animate==='boolean') ? prefs.animate : d.def;
   });
-  const NID = {}; nodes.forEach(n=>NID[n.name]=n.id);
+  function saveSettings(){ savePrefs({ settings:Object.assign({}, settings), animate:settings.animate }); }
 
-  /* ============== ROADS (edges) ============== */
-  const edges = [];
-  // Every edge carries its polyline (pts, world coordinates), cumulative lengths (cum), total real
-  // road length (len, world units) and a bounding box for culling. Roads with no known shape
-  // (and the local access roads) are straight lines between their two ends.
-  function finishEdge(e, pts){
-    const cum=[0]; let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
-    pts.forEach((p,i)=>{
-      if(i>0) cum.push(cum[i-1]+Math.hypot(p.x-pts[i-1].x, p.y-pts[i-1].y));
-      if(p.x<x0)x0=p.x; if(p.x>x1)x1=p.x; if(p.y<y0)y0=p.y; if(p.y>y1)y1=p.y;
-    });
-    e.pts=pts; e.cum=cum; e.len=cum[cum.length-1]; e.bbox={x0,y0,x1,y1};
-    return e;
-  }
-  function road(a,b,type,name){
-    const A=nodes[NID[a]], B=nodes[NID[b]];
-    const shape=ROAD_SHAPES[a+'|'+b];
-    let pts = shape && shape.length>1 ? shape.map(([lat,lon])=>proj(lat,lon)) : [A,B];
-    pts[0]={x:A.x,y:A.y}; pts[pts.length-1]={x:B.x,y:B.y}; // pin the ends to the town dots
-    edges.push(finishEdge({a:A.id,b:B.id,type,name,limit:SPEED_LIMITS[a+'|'+b]}, pts));
-  }
-  // position + heading a distance d (world units) along an edge, travelling forward (a->b) or not
-  function pointAlong(e, forward, d){
-    const L=e.len, t = forward ? Math.max(0,Math.min(L,d)) : L-Math.max(0,Math.min(L,d));
-    const cum=e.cum, pts=e.pts;
-    let lo=1, hi=cum.length-1;
-    while(lo<hi){ const mid=(lo+hi)>>1; if(cum[mid]<t) lo=mid+1; else hi=mid; }
-    const A=pts[lo-1], B=pts[lo], seg=cum[lo]-cum[lo-1], u = seg>0 ? (t-cum[lo-1])/seg : 0;
-    let heading=Math.atan2(B.y-A.y,B.x-A.x); if(!forward) heading+=Math.PI;
-    return { x:A.x+(B.x-A.x)*u, y:A.y+(B.y-A.y)*u, heading };
-  }
-  // bearing of the first (or last) few km of an edge as driven, used for left/right turn calls
-  function edgeBearing(e, forward, atEnd){
-    const L=e.len, span=Math.min(L,3);
-    const p=pointAlong(e,forward, atEnd ? L-span : 0), q=pointAlong(e,forward, atEnd ? L : span);
-    return Math.atan2(q.y-p.y,q.x-p.x);
-  }
-  // Bruce Highway spine
-  road("Innisfail","Tully","highway","Bruce Highway");
-  road("Tully","Cardwell","highway","Bruce Highway");
-  road("Cardwell","Ingham","highway","Bruce Highway");
-  road("Ingham","Townsville","highway","Bruce Highway");
-  road("Bowen","Proserpine","highway","Bruce Highway");
-  road("Proserpine","Mackay","highway","Bruce Highway");
-  road("Proserpine","Airlie Beach","rural","Shute Harbour Road");
-  road("Mackay","Sarina","highway","Bruce Highway");
-  road("Gladstone","Miriam Vale","highway","Bruce Highway");
-  road("Miriam Vale","Gin Gin","highway","Bruce Highway");
-  road("Gin Gin","Bundaberg","highway","Bruce Highway");
-  road("Miriam Vale","Agnes Water","rural","Round Hill Road");
-  road("Bundaberg","Childers","rural","Bruce Highway");
-  road("Childers","Maryborough","rural","Bruce Highway");
-  road("Maryborough","Hervey Bay","rural","Maryborough–Hervey Bay Road");
-  road("Caboolture","Brisbane","highway","Bruce Highway");
-  road("Brisbane","Redcliffe","rural","Houghton Highway");
-  road("Noosa","Sunshine Coast","rural","Sunshine Motorway");
-  road("Gympie","Tin Can Bay","rural","Tin Can Bay Road");
-  // Capricorn / Burnett
-  road("Rockhampton","Yeppoon","rural","Yeppoon Road");
-  road("Rockhampton","Mount Morgan","rural","Burnett Highway");
-  road("Mount Morgan","Biloela","rural","Burnett Highway");
-  road("Biloela","Monto","rural","Burnett Highway");
-  road("Gayndah","Murgon","rural","Burnett Highway");
-  road("Kingaroy","Dalby","rural","Bunya Highway");
-  road("Theodore","Taroom","rural","Leichhardt Highway");
-  road("Taroom","Wandoan","rural","Leichhardt Highway");
-  road("Wandoan","Miles","rural","Leichhardt Highway");
-  road("Taroom","Injune","rural","Injune–Taroom Road");
-  road("Injune","Roma","rural","Carnarvon Highway");
-  // Far north
-  road("Cairns","Port Douglas","highway","Captain Cook Highway");
-  road("Cairns","Atherton","rural","Gillies Highway");
-  road("Mareeba","Atherton","rural","Kennedy Highway");
-  road("Atherton","Ravenshoe","rural","Kennedy Highway");
-  road("Lakeland","Cooktown","rural","Mulligan Highway");
-  road("Lakeland","Laura","outback","Peninsula Developmental Road");
-  road("Coen","Weipa","outback","Peninsula Developmental Road");
-  road("Coen","Lockhart River","outback","Lockhart River Road");
-  road("Coen","Bamaga","outback","Bamaga Road");
-  road("Weipa","Aurukun","outback","Aurukun Road");
-  // Gulf Savannah
-  road("Mount Surprise","Georgetown","rural","Gulf Developmental Road");
-  road("Georgetown","Croydon","outback","Gulf Developmental Road");
-  road("Croydon","Normanton","outback","Gulf Developmental Road");
-  road("Normanton","Karumba","rural","Karumba Road");
-  road("Normanton","Burketown","outback","Burketown Road");
-  road("Burketown","Doomadgee","outback","Doomadgee Road");
-  road("Normanton","Cloncurry","outback","Burke Developmental Road");
-  // Flinders / Barkly (west)
-  road("Townsville","Charters Towers","rural","Flinders Highway");
-  road("Hughenden","Richmond","rural","Flinders Highway");
-  road("Richmond","Julia Creek","rural","Flinders Highway");
-  road("Julia Creek","Cloncurry","rural","Flinders Highway");
-  road("Cloncurry","Mount Isa","rural","Barkly Highway");
-  road("Mount Isa","Camooweal","rural","Barkly Highway");
-  road("Mount Isa","Dajarra","outback","Donohue Highway");
-  road("Dajarra","Boulia","outback","Donohue Highway");
-  road("Hughenden","Winton","outback","Kennedy Developmental Road");
-  road("Boulia","Winton","outback","Kennedy Developmental Road");
-  road("Boulia","Bedourie","outback","Diamantina Developmental Road");
-  road("Bedourie","Birdsville","outback","Birdsville Developmental Road");
-  road("Windorah","Jundah","outback","Jundah–Windorah Road");
-  road("Windorah","Eromanga","outback","Windorah–Eromanga Road");
-  road("Bowen","Collinsville","rural","Bowen Developmental Road");
-  // Matilda / Landsborough (central west)
-  road("Kynuna","Winton","outback","Landsborough Highway");
-  road("Winton","Longreach","rural","Landsborough Highway");
-  road("Barcaldine","Aramac","outback","Aramac Road");
-  road("Barcaldine","Jericho","rural","Capricorn Highway");
-  road("Jericho","Alpha","rural","Capricorn Highway");
-  road("Barcaldine","Blackall","outback","Landsborough Highway");
-  road("Blackall","Tambo","outback","Landsborough Highway");
-  road("Tambo","Augathella","outback","Landsborough Highway");
-  road("Augathella","Charleville","outback","Landsborough Highway");
-  // Gregory / Peak Downs (Bowen Basin)
-  road("Emerald","Springsure","rural","Gregory Highway");
-  road("Emerald","Capella","rural","Gregory Highway");
-  road("Capella","Clermont","rural","Gregory Highway");
-  road("Clermont","Charters Towers","outback","Gregory Highway");
-  road("Clermont","Moranbah","rural","Peak Downs Highway");
-  road("Moranbah","Dysart","rural","Peak Downs Highway");
-  road("Moranbah","Nebo","rural","Peak Downs Highway");
-  road("Nebo","Mackay","rural","Peak Downs Highway");
-  // Warrego (south west)
-  road("Mitchell","Roma","rural","Warrego Highway");
-  road("Miles","Chinchilla","rural","Warrego Highway");
-  road("Chinchilla","Dalby","rural","Warrego Highway");
-  road("Toowoomba","Gatton","highway","Warrego Highway");
-  road("Ipswich","Brisbane","highway","Ipswich Motorway");
-  // Far south west
-  road("Quilpie","Eromanga","outback","Adventure Way");
-  road("Quilpie","Thargomindah","outback","Adventure Way");
-  road("Cunnamulla","Bollon","rural","Balonne Highway");
-  road("Bollon","St George","rural","Balonne Highway");
-  road("St George","Dirranbandi","rural","Balonne Highway");
-  road("St George","Surat","rural","Carnarvon Highway");
-  road("Surat","Roma","rural","Carnarvon Highway");
-  road("St George","Goondiwindi","rural","Barwon Highway");
-  // South east corner
-  road("Brisbane","Gold Coast","highway","Pacific Motorway");
-  road("Brisbane","Beaudesert","rural","Mount Lindesay Highway");
-  road("Ipswich","Warwick","rural","Cunningham Highway");
-  road("Warwick","Stanthorpe","rural","New England Highway");
-  road("Warwick","Inglewood","rural","Cunningham Highway");
-
-  // Smaller-town roads and links
-  road("Cairns","Gordonvale","highway","Bruce Highway");
-  road("Gordonvale","Babinda","highway","Bruce Highway");
-  road("Babinda","Innisfail","highway","Bruce Highway");
-  road("Cairns","Kuranda","rural","Kennedy Highway");
-  road("Kuranda","Mareeba","rural","Kennedy Highway");
-  road("Innisfail","Millaa Millaa","rural","Palmerston Highway");
-  road("Millaa Millaa","Malanda","rural","Palmerston Highway");
-  road("Malanda","Atherton","rural","Malanda–Atherton Road");
-  road("Mareeba","Mount Molloy","rural","Mulligan Highway");
-  road("Mount Molloy","Lakeland","rural","Mulligan Highway");
-  road("Laura","Musgrave","outback","Peninsula Developmental Road");
-  road("Musgrave","Coen","outback","Peninsula Developmental Road");
-  road("Mareeba","Dimbulah","rural","Burke Developmental Road");
-  road("Dimbulah","Chillagoe","outback","Burke Developmental Road");
-  road("Ravenshoe","Mount Garnet","rural","Kennedy Highway");
-  road("Mount Garnet","Mount Surprise","rural","Kennedy Highway");
-  road("Townsville","Giru","highway","Bruce Highway");
-  road("Giru","Ayr","highway","Bruce Highway");
-  road("Ayr","Home Hill","highway","Bruce Highway");
-  road("Home Hill","Bowen","highway","Bruce Highway");
-  road("Sarina","Carmila","highway","Bruce Highway");
-  road("Carmila","Marlborough","highway","Bruce Highway");
-  road("Marlborough","Rockhampton","highway","Bruce Highway");
-  road("Rockhampton","Mount Larcom","highway","Bruce Highway");
-  road("Mount Larcom","Gladstone","highway","Bruce Highway");
-  road("Gladstone","Calliope","rural","Dawson Highway");
-  road("Calliope","Biloela","rural","Dawson Highway");
-  road("Springsure","Rolleston","rural","Dawson Highway");
-  road("Rolleston","Banana","rural","Dawson Highway");
-  road("Banana","Biloela","rural","Dawson Highway");
-  road("Biloela","Moura","rural","Leichhardt Highway");
-  road("Moura","Theodore","rural","Leichhardt Highway");
-  road("Monto","Eidsvold","rural","Burnett Highway");
-  road("Eidsvold","Mundubbera","rural","Burnett Highway");
-  road("Mundubbera","Gayndah","rural","Burnett Highway");
-  road("Kingaroy","Wondai","rural","Wide Bay Highway");
-  road("Wondai","Murgon","rural","Wide Bay Highway");
-  road("Murgon","Goomeri","rural","Wide Bay Highway");
-  road("Goomeri","Gympie","rural","Wide Bay Highway");
-  road("Kingaroy","Nanango","rural","D'Aguilar Highway");
-  road("Nanango","Yarraman","rural","D'Aguilar Highway");
-  road("Yarraman","Crows Nest","rural","New England Highway");
-  road("Crows Nest","Toowoomba","rural","New England Highway");
-  road("Maryborough","Tiaro","highway","Bruce Highway");
-  road("Tiaro","Gympie","highway","Bruce Highway");
-  road("Gympie","Cooroy","highway","Bruce Highway");
-  road("Cooroy","Nambour","highway","Bruce Highway");
-  road("Nambour","Landsborough","highway","Bruce Highway");
-  road("Landsborough","Caboolture","highway","Bruce Highway");
-  road("Sunshine Coast","Nambour","rural","Sunshine Motorway");
-  road("Cooroy","Noosa","rural","Cooroy–Noosa Road");
-  road("Landsborough","Maleny","rural","Maleny–Landsborough Road");
-  road("Caboolture","Woodford","rural","D'Aguilar Highway");
-  road("Woodford","Kilcoy","rural","D'Aguilar Highway");
-  road("Kilcoy","Blackbutt","rural","D'Aguilar Highway");
-  road("Blackbutt","Yarraman","rural","D'Aguilar Highway");
-  road("Blackwater","Dingo","rural","Capricorn Highway");
-  road("Dingo","Duaringa","rural","Capricorn Highway");
-  road("Duaringa","Rockhampton","rural","Capricorn Highway");
-  road("Emerald","Comet","rural","Capricorn Highway");
-  road("Comet","Blackwater","rural","Capricorn Highway");
-  road("Alpha","Bogantungan","rural","Capricorn Highway");
-  road("Bogantungan","Anakie","rural","Capricorn Highway");
-  road("Anakie","Emerald","rural","Capricorn Highway");
-  road("Longreach","Ilfracombe","rural","Landsborough Highway");
-  road("Ilfracombe","Barcaldine","rural","Landsborough Highway");
-  road("Cloncurry","McKinlay","outback","Landsborough Highway");
-  road("McKinlay","Kynuna","outback","Landsborough Highway");
-  road("Charters Towers","Pentland","rural","Flinders Highway");
-  road("Pentland","Torrens Creek","rural","Flinders Highway");
-  road("Torrens Creek","Hughenden","rural","Flinders Highway");
-  road("Burketown","Gregory Downs","outback","Wills Developmental Road");
-  road("Gregory Downs","Camooweal","outback","Wills Developmental Road");
-  road("Gatton","Laidley","highway","Warrego Highway");
-  road("Laidley","Ipswich","highway","Warrego Highway");
-  road("Toowoomba","Clifton","rural","New England Highway");
-  road("Clifton","Allora","rural","New England Highway");
-  road("Allora","Warwick","rural","New England Highway");
-  road("Goondiwindi","Moonie","rural","Moonie Highway");
-  road("Moonie","Tara","rural","Moonie Highway");
-  road("Tara","Dalby","rural","Moonie Highway");
-  road("Inglewood","Yelarbon","rural","Cunningham Highway");
-  road("Yelarbon","Goondiwindi","rural","Cunningham Highway");
-  road("Roma","Wallumbilla","rural","Warrego Highway");
-  road("Wallumbilla","Yuleba","rural","Warrego Highway");
-  road("Yuleba","Miles","rural","Warrego Highway");
-  road("Charleville","Morven","rural","Warrego Highway");
-  road("Morven","Mitchell","rural","Warrego Highway");
-  road("Charleville","Wyandra","rural","Mitchell Highway");
-  road("Wyandra","Cunnamulla","rural","Mitchell Highway");
-  road("Thargomindah","Eulo","outback","Bulloo Developmental Road");
-  road("Eulo","Cunnamulla","outback","Bulloo Developmental Road");
-  road("Charleville","Adavale","outback","Adventure Way");
-  road("Adavale","Quilpie","outback","Adventure Way");
-  road("Birdsville","Betoota","outback","Birdsville Developmental Road");
-  road("Betoota","Windorah","outback","Birdsville Developmental Road");
-  road("Jundah","Stonehenge","outback","Thomson Developmental Road");
-  road("Stonehenge","Longreach","outback","Thomson Developmental Road");
-  road("Dalby","Oakey","highway","Warrego Highway");
-  road("Oakey","Toowoomba","highway","Warrego Highway");
-  road("Toowoomba","Pittsworth","rural","Gore Highway");
-  road("Pittsworth","Millmerran","rural","Gore Highway");
-  road("Millmerran","Goondiwindi","rural","Gore Highway");
-  road("Kowanyama","Normanton","outback","Kowanyama Road");
-  road("Port Douglas","Mossman","highway","Captain Cook Highway");
-  road("Herberton","Atherton","rural","Herberton Road");
-  road("Hope Vale","Cooktown","rural","Hope Vale Road");
-  road("Forsayth","Georgetown","outback","Gulf Developmental Road");
-  road("Collinsville","Glenden","rural","Bowen Developmental Road");
-  road("Glenden","Nebo","rural","Suttor Developmental Road");
-  road("Emu Park","Yeppoon","rural","Emu Park Road");
-  road("Tieri","Capella","rural","Capella–Tieri Road");
-  road("Middlemount","Dysart","rural","Dysart–Middlemount Road");
-  road("Urandangi","Dajarra","outback","Urandangi Road");
-  road("Noccundra","Thargomindah","outback","Adventure Way");
-  road("Longreach","Muttaburra","outback","Muttaburra Road");
-  road("Muttaburra","Aramac","outback","Muttaburra Road");
-  road("Killarney","Warwick","rural","Killarney Road");
-  road("Ipswich","Boonah","rural","Ipswich–Boonah Road");
-  road("Boonah","Beaudesert","rural","Beaudesert–Boonah Road");
-  road("Rathdowney","Beaudesert","rural","Mount Lindesay Highway");
-  road("Beaudesert","Canungra","rural","Beaudesert–Nerang Road");
-  road("Canungra","Gold Coast","rural","Beaudesert–Nerang Road");
-  road("Ipswich","Lowood","rural","Brisbane Valley Highway");
-  road("Lowood","Esk","rural","Brisbane Valley Highway");
-  road("Esk","Toogoolawah","rural","Brisbane Valley Highway");
-  road("Toogoolawah","Yarraman","rural","Brisbane Valley Highway");
-  road("Ilfracombe","Isisford","outback","Isisford Road");
-  road("Isisford","Blackall","outback","Isisford Road");
-  road("Gin Gin","Mount Perry","rural","Mount Perry Road");
-  road("Mount Perry","Gayndah","rural","Mount Perry Road");
-
-  const adj = new Map(); nodes.forEach(n=>adj.set(n.id, []));
-  edges.forEach((e,i)=>{ adj.get(e.a).push({to:e.b, edgeIdx:i}); adj.get(e.b).push({to:e.a, edgeIdx:i}); });
-
-  // Fallback only — every road in the network has its own signed limit in speeds.json
-  // (Queensland's default limit outside built-up areas is 100 km/h).
-  const SPEED = { highway:100, rural:100, outback:100, access:80, suburb:50 }; // access/suburb = local roads to extra places
-  function edgeSpeed(e){ return e.limit || SPEED[e.type]; }
-  function edgeKm(e){ return e.len*KM_PER_UNIT; }
-  function edgeSeconds(e){ return edgeKm(e)/edgeSpeed(e)*3600; }
-  function heuristicSeconds(fromId,goalId){
-    const a=nodes[fromId], b=nodes[goalId];
-    return Math.hypot(a.x-b.x,a.y-b.y)*KM_PER_UNIT/MAX_SPEED*3600;
-  }
-
-  /* ============== STATE OUTLINE (hand-traced from real lat/lon) ============== */
-  // Mainland, clockwise from the tip of Cape York: east coast, the NSW border (Point Danger →
-  // Macpherson Range → Dumaresq/Macintyre rivers → 29°S), the SA border (141°E, 26°S), the NT
-  // border (138°E), then the Gulf of Carpentaria coast back up to the Cape.
-  const MAINLAND_LL = [
-    [-10.69,142.53],[-10.95,142.62],[-11.40,142.85],[-11.95,143.15],[-12.60,143.42],[-13.00,143.45],
-    [-13.40,143.62],[-13.95,143.95],[-14.17,144.50],[-14.60,144.90],[-14.95,145.32],[-15.15,145.35],
-    [-15.47,145.33],[-15.70,145.42],[-16.07,145.50],[-16.48,145.56],[-16.75,145.72],[-16.90,145.93],
-    [-16.88,146.03],[-17.20,146.06],[-17.50,146.10],[-17.90,146.13],[-18.26,146.12],[-18.50,146.36],
-    [-18.80,146.45],[-19.00,146.65],[-19.10,146.85],[-19.20,147.00],[-19.25,147.05],[-19.35,147.45],
-    [-19.50,147.56],[-19.70,147.72],[-19.88,148.10],[-19.95,148.35],[-19.98,148.50],[-20.20,148.66],
-    [-20.27,148.90],[-20.50,148.92],[-20.70,148.97],[-20.90,149.10],[-21.10,149.28],[-21.40,149.36],
-    [-21.50,149.47],[-21.80,149.55],[-22.10,149.75],[-22.40,150.05],[-22.70,150.40],[-22.90,150.80],
-    [-23.10,150.85],[-23.50,151.25],[-23.75,151.40],[-24.05,151.75],[-24.20,151.98],[-24.55,152.25],
-    [-24.75,152.45],[-24.90,152.53],[-25.15,152.63],[-25.20,152.78],[-25.22,152.92],[-25.32,152.96],
-    [-25.50,152.92],[-25.70,152.94],[-25.80,153.08],[-25.90,153.14],[-25.95,153.20],[-26.20,153.12],
-    [-26.40,153.17],[-26.65,153.18],[-26.85,153.18],[-27.05,153.21],[-27.20,153.25],[-27.40,153.25],
-    [-27.55,153.32],[-27.80,153.42],[-28.00,153.50],[-28.17,153.56],
-    [-28.20,153.30],[-28.25,153.00],[-28.29,152.77],[-28.45,152.50],[-28.60,152.20],[-28.75,152.05],
-    [-28.93,151.93],[-28.95,151.60],[-28.95,151.30],[-28.85,151.00],[-28.72,150.70],[-28.68,150.40],
-    [-28.66,150.20],[-28.66,149.80],[-28.85,149.40],[-29.00,149.00],[-29.00,141.00],[-26.00,141.00],
-    [-26.00,138.00],[-17.68,138.00],
-    [-17.55,138.50],[-17.50,139.00],[-17.55,139.60],[-17.45,140.20],[-17.40,140.90],[-17.20,141.15],
-    [-16.60,141.30],[-15.50,141.60],[-14.50,141.60],[-13.40,141.55],[-12.90,141.65],[-12.63,141.72],
-    [-12.00,141.85],[-11.40,141.90],[-10.95,142.15],[-10.70,142.30],
-  ];
-  const ISLANDS_LL = [
-    [[-24.72,153.20],[-24.95,153.33],[-25.45,153.37],[-25.72,153.22],[-25.75,153.05],[-25.40,152.98],[-25.10,153.00],[-24.85,153.05]], // K'gari (Fraser Island)
-    [[-26.95,153.37],[-27.03,153.48],[-27.30,153.42],[-27.20,153.38]],                                                             // Moreton Island
-    [[-27.40,153.42],[-27.48,153.56],[-27.72,153.48],[-27.55,153.40]],                                                             // North Stradbroke Island
-    [[-16.45,139.30],[-16.45,139.55],[-16.70,139.60],[-16.72,139.32]],                                                             // Mornington Island
-  ];
-  const LAND = [MAINLAND_LL, ...ISLANDS_LL].map(poly=> poly.map(([lat,lon])=>proj(lat,lon)));
-
-  /* ============== EXTRA PLACES (searchable/tappable, not part of the road network) ============== */
-  // Every row of places.json is [name, lat, lon, kind]. The kind picks the row below: how it is
-  // described in search, and its rank, which sets how deep you have to zoom before its name shows
-  // (see LABEL_MIN_SCALE). Picking a place wires it into the road graph on demand (see
-  // ensurePlaceNode), so the routing algorithms only ever see the towns plus places you visit.
-  const PLACE_KINDS = {
-    city:     { label:'City',     rank:3 },
-    town:     { label:'Town',     rank:4 },
-    village:  { label:'Village',  rank:5 },
-    hamlet:   { label:'Hamlet',   rank:6 },
-    suburb:   { label:'Suburb',   rank:7 },
-    locality: { label:'Locality', rank:8 },
-  };
-  const places = PLACE_DATA.map(([name,lat,lon,kind])=>{
-    const info = PLACE_KINDS[kind] || PLACE_KINDS.locality;
-    const p = proj(lat,lon);
-    return { name, lat, lon, kind, label:info.label, rank:info.rank, x:p.x, y:p.y, nodeId:null, link:null };
-  });
-  // Local roads: every place is linked into the network by a minimum spanning tree grown outward
-  // from the towns, so each one hangs off its nearest neighbour (a town or another place). The
-  // links are drawn whenever a place is, and become real graph edges once a place is picked.
-  (function linkPlaces(){
-    const n=places.length, attached=new Uint8Array(n), bestD2=new Float64Array(n).fill(Infinity), bestFrom=new Array(n);
-    places.forEach((p,i)=>{
-      nodes.forEach(t=>{ const dx=t.x-p.x, dy=t.y-p.y, d2=dx*dx+dy*dy; if(d2<bestD2[i]){ bestD2[i]=d2; bestFrom[i]={kind:'node', idx:t.id}; } });
-    });
-    const xs=new Float64Array(places.map(p=>p.x)), ys=new Float64Array(places.map(p=>p.y));
-    for(let k=0;k<n;k++){
-      let pick=-1;
-      for(let i=0;i<n;i++) if(!attached[i] && (pick<0 || bestD2[i]<bestD2[pick])) pick=i;
-      attached[pick]=1;
-      places[pick].link={ kind:bestFrom[pick].kind, idx:bestFrom[pick].idx, len:Math.sqrt(bestD2[pick]) };
-      const px=xs[pick], py=ys[pick];
-      for(let i=0;i<n;i++){
-        if(attached[i]) continue;
-        const dx=xs[i]-px, dy=ys[i]-py, d2=dx*dx+dy*dy;
-        if(d2<bestD2[i]){ bestD2[i]=d2; bestFrom[i]={kind:'place', idx:pick}; }
-      }
-    }
-  })();
-
-  /* ============== ROUTE ALGORITHMS ============== */
-  // One trace step: town u was expanded, and (unless it is the start) the road it was reached by.
-  function expandStep(u,parent){
-    const pe=parent.get(u);
-    return pe ? { expand:u, from:pe.from, edgeIdx:pe.edgeIdx } : { expand:u };
-  }
-  function buildResult(startId,endId,parent,trace){
-    if(endId!==startId && !parent.has(endId)) return null;
-    const path=[]; let cur=endId;
-    while(cur!==startId){ const pe=parent.get(cur); if(!pe) return null; path.unshift({edgeIdx:pe.edgeIdx, from:pe.from, to:cur}); cur=pe.from; }
-    let totalSec=0, totalLen=0;
-    path.forEach(seg=>{ const e=edges[seg.edgeIdx]; totalSec+=edgeSeconds(e); totalLen+=edgeKm(e); });
-    const explored = new Set(); trace.forEach(t=>{ if(t.expand!==undefined) explored.add(t.expand); });
-    return { path, trace, totalSec, totalLenKm:totalLen, nodesExplored:explored.size };
-  }
-  function runBFS(startId,endId){
-    const visited=new Set([startId]), parent=new Map(), trace=[], queue=[startId];
-    while(queue.length){
-      const u=queue.shift(); trace.push(expandStep(u,parent));
-      if(u===endId) break;
-      for(const link of adj.get(u)){ if(!visited.has(link.to)){ visited.add(link.to); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); queue.push(link.to); } }
-    }
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runDFS(startId,endId){
-    const visited=new Set(), parent=new Map(), trace=[]; let found=false;
-    function dfs(u){
-      visited.add(u); trace.push(expandStep(u,parent));
-      if(u===endId) return true;
-      for(const link of adj.get(u)){
-        if(found) return true;
-        if(!visited.has(link.to)){ parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); if(dfs(link.to)) return true; }
-      }
-      return false;
-    }
-    found = dfs(startId);
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runIDS(startId,endId){
-    const trace=[]; const parent=new Map(); let found=false;
-    function dls(u, path, depth, limit){
-      trace.push(expandStep(u,parent));
-      if(u===endId){ found=true; return true; }
-      if(depth>=limit) return false;
-      for(const link of adj.get(u)){
-        if(path.includes(link.to)) continue;
-        parent.set(link.to,{from:u,edgeIdx:link.edgeIdx});
-        path.push(link.to);
-        if(dls(link.to, path, depth+1, limit)) return true;
-        path.pop();
-      }
-      return false;
-    }
-    let limit=0;
-    while(!found && limit<=nodes.length){
-      if(dls(startId, [startId], 0, limit)) break;
-      trace.push({iterationEnd:true, depth:limit});
-      limit++;
-    }
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runDijkstra(startId,endId){
-    const dist=new Map(), parent=new Map(), visited=new Set(), trace=[];
-    nodes.forEach(n=>dist.set(n.id,Infinity)); dist.set(startId,0);
-    while(true){
-      let u=-1,best=Infinity;
-      for(const n of nodes) if(!visited.has(n.id) && dist.get(n.id)<best){ best=dist.get(n.id); u=n.id; }
-      if(u===-1) break;
-      visited.add(u); trace.push(expandStep(u,parent));
-      if(u===endId) break;
-      for(const link of adj.get(u)){
-        const e=edges[link.edgeIdx], nd=dist.get(u)+edgeSeconds(e);
-        if(nd<dist.get(link.to)){ dist.set(link.to,nd); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); }
-      }
-    }
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runAStar(startId,endId){
-    const g=new Map(), parent=new Map(), visited=new Set(), trace=[];
-    nodes.forEach(n=>g.set(n.id,Infinity)); g.set(startId,0);
-    while(true){
-      let u=-1,best=Infinity;
-      for(const n of nodes){ if(visited.has(n.id) || g.get(n.id)===Infinity) continue;
-        const f=g.get(n.id)+heuristicSeconds(n.id,endId); if(f<best){best=f;u=n.id;} }
-      if(u===-1) break;
-      visited.add(u); trace.push(expandStep(u,parent));
-      if(u===endId) break;
-      for(const link of adj.get(u)){
-        const e=edges[link.edgeIdx], ng=g.get(u)+edgeSeconds(e);
-        if(ng<g.get(link.to)){ g.set(link.to,ng); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); }
-      }
-    }
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runIDAStar(startId,endId){
-    const trace=[]; const parent=new Map(); let found=false;
-    let threshold=heuristicSeconds(startId,endId);
-    const path=[startId];
-    function search(g,bound){
-      const u=path[path.length-1];
-      const f=g+heuristicSeconds(u,endId);
-      trace.push(expandStep(u,parent));
-      if(f>bound) return f;
-      if(u===endId){ found=true; return -1; }
-      let min=Infinity;
-      for(const link of adj.get(u)){
-        if(path.includes(link.to)) continue;
-        const e=edges[link.edgeIdx];
-        parent.set(link.to,{from:u,edgeIdx:link.edgeIdx});
-        path.push(link.to);
-        const t=search(g+edgeSeconds(e), bound);
-        if(found) return -1;
-        path.pop();
-        if(t<min) min=t;
-      }
-      return min;
-    }
-    let iter=0;
-    while(!found && iter<2000){
-      const t=search(0,threshold); iter++;
-      if(found) break;
-      if(t===Infinity) break;
-      threshold=t;
-      trace.push({iterationEnd:true, threshold:t});
-    }
-    return buildResult(startId,endId,parent,trace);
-  }
-  function runWave(startId,endId){
-    // A flood: the search spreads outward from the start along every road at once, all at the same
-    // speed (distance, not travel time), until the first wave front reaches the destination.
-    const dist=new Map(), parent=new Map(), settled=new Set(), order=[];
-    nodes.forEach(n=>dist.set(n.id,Infinity)); dist.set(startId,0);
-    while(true){
-      let u=-1,best=Infinity;
-      for(const n of nodes) if(!settled.has(n.id) && dist.get(n.id)<best){ best=dist.get(n.id); u=n.id; }
-      if(u===-1) break;
-      settled.add(u); order.push(u);
-      if(u===endId) break;
-      for(const link of adj.get(u)){
-        const nd=dist.get(u)+edges[link.edgeIdx].len;
-        if(nd<dist.get(link.to)){ dist.set(link.to,nd); parent.set(link.to,{from:u,edgeIdx:link.edgeIdx}); }
-      }
-    }
-    if(!settled.has(endId)) return null;
-    const T=dist.get(endId);
-    // Each road is grown from both ends by the fronts that reach it; two fronts stop where they
-    // meet. s0 = when a front enters the road, s1 = when it stops (all in distance units).
-    const segs=[];
-    order.forEach(u=>{
-      const du=dist.get(u);
-      adj.get(u).forEach(link=>{
-        const e=edges[link.edgeIdx], v=link.to;
-        const stop = settled.has(v) ? Math.min((e.len+du+dist.get(v))/2, T) : Math.min(du+e.len, T);
-        if(stop>du) segs.push({ edgeIdx:link.edgeIdx, fwd:e.a===u, s0:du, s1:stop });
-      });
-    });
-    const result=buildResult(startId,endId,parent,order.map(u=>expandStep(u,parent)));
-    if(result) result.wave={ segs, T };
-    return result;
-  }
-  const ALGS = {
-    bfs:{fn:runBFS, label:"BFS", color:"--alg-bfs", desc:"Explores outward in equal steps, ignoring speed limits — finds the route with the fewest towns, not the fastest one."},
-    dfs:{fn:runDFS, label:"DFS", color:"--alg-dfs", desc:"Commits to one direction and only backtracks at dead ends — gets you there, but rarely by a sensible way."},
-    ids:{fn:runIDS, label:"IDS", color:"--alg-ids", desc:"DFS re-run from scratch with the depth limit raised by one each pass — finds the same fewest-towns route as BFS, using barely any memory."},
-    dijkstra:{fn:runDijkstra, label:"Dijkstra", color:"--alg-dijkstra", desc:"Always finds the fastest route by travel time, expanding the whole map evenly outward from the start."},
-    astar:{fn:runAStar, label:"A*", color:"--alg-astar", desc:"Same optimal answer as Dijkstra, but a straight-line estimate to the destination steers the search there faster."},
-    wave:{fn:runWave, label:"Wave", color:"--alg-wave", desc:"Floods outward from the start along every road at once, at the same speed everywhere — the first wave to reach the destination has found the shortest route by distance, though not always the fastest."},
-    ida:{fn:runIDAStar, label:"IDA*", color:"--alg-ida", desc:"A* logic run as repeated shallow dives with a rising cutoff — slower to watch, but barely any memory needed."},
-  };
+  /* ============== GRAPH + ALGORITHMS ============== */
+  const graph = createGraph({ towns:TOWNS, roads:ROADS, roadShapes:ROAD_SHAPES, speedLimits:SPEED_LIMITS,
+    coast:COAST, places:PLACE_DATA, localRoads:LOCAL_ROADS }, settings);
+  const { nodes, edges, NID, places, LAND, edgeSeconds, edgeKm, pointAlong, edgeBearing } = graph;
+  const { ALGS, runDijkstra } = createAlgorithms(graph);
 
   /* ============== CANVAS / CAMERA ============== */
-  const canvas=document.getElementById('map'), ctx=canvas.getContext('2d');
+  const canvas=$('map'), ctx=canvas.getContext('2d');
   let dpr=Math.min(window.devicePixelRatio||1,2), scale=1, offsetX=0, offsetY=0, W=0,H=0;
   function resize(){
     const rect = canvas.getBoundingClientRect();
@@ -727,27 +91,45 @@ export function initDriftline() {
   let hasInteracted=false;
   resize(); fitToState();
 
-  /* ============== PAN / ZOOM (mouse drag + single-finger pan + two-finger pinch) ============== */
+  // zoom level at which each rank gets a name label (ranks 1-4 towns, 3-8 extra places)
+  const LABEL_MIN_SCALE = {1:0, 2:0.8, 3:1.2, 4:2.2, 5:3.6, 6:5.5, 7:12, 8:24};
+  function placeVisible(p){ return settings.showPlaces && scale>=LABEL_MIN_SCALE[p.rank]*0.75; } // dots appear a little before their names do
+
+  /* ============== PAN / ZOOM / TAP / LONG-PRESS ============== */
   let dragging=false, dragMoved=false, lastX=0, lastY=0, followMode=false;
   const activePointers = new Map(); // pointerId -> {x,y}
   let pinchActive=false, pinchLastDist=0;
+  let longPressTimer=null, longPressFired=false, pressStart=null;
   function ptDist(p1,p2){ return Math.hypot(p1.x-p2.x, p1.y-p2.y); }
   function ptMid(p1,p2){ return {x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2}; }
+  function cancelLongPress(){ if(longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; } }
 
   canvas.addEventListener('pointerdown', e=>{
+    closeCtxMenu();
     canvas.style.cursor=''; // let the .dragging grab cursor take over while panning
     canvas.setPointerCapture(e.pointerId);
     activePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
     if(activePointers.size===1){
       dragging=true; dragMoved=false; pinchActive=false; canvas.classList.add('dragging');
       lastX=e.clientX; lastY=e.clientY;
+      longPressFired=false; cancelLongPress();
+      if(e.button===0 || e.button===undefined){
+        pressStart={x:e.clientX, y:e.clientY};
+        longPressTimer=setTimeout(()=>{
+          longPressTimer=null;
+          if(activePointers.size!==1 || pinchActive) return;
+          longPressFired=true; openCtxMenuAt(pressStart.x, pressStart.y);
+        }, 550);
+      }
     } else if(activePointers.size===2){
+      cancelLongPress();
       dragging=false; pinchActive=true; dragMoved=true; // a two-finger touch is never a tap
       const pts=[...activePointers.values()];
       pinchLastDist = ptDist(pts[0], pts[1]);
     }
   });
 
+  // the town / extra place under a screen position, if any (towns win ties)
   function nodeAtClient(clientX, clientY){
     const rect=canvas.getBoundingClientRect(); const w=screenToWorld(clientX-rect.left, clientY-rect.top);
     let best=null,bestD=20/scale;
@@ -755,7 +137,6 @@ export function initDriftline() {
     for(const p of places){ if(!placeVisible(p)) continue; const d=Math.hypot(p.x-w.x,p.y-w.y); if(d<bestD){bestD=d;best=p;} }
     return best;
   }
-  function placeVisible(p){ return scale>=LABEL_MIN_SCALE[p.rank]*0.75; } // dots appear a little before their names do
   canvas.addEventListener('pointermove', e=>{
     if(!activePointers.has(e.pointerId)){
       // plain hover (no button/finger down) — show a pointer over anything tappable
@@ -763,6 +144,7 @@ export function initDriftline() {
       return;
     }
     activePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+    if(pressStart && Math.hypot(e.clientX-pressStart.x, e.clientY-pressStart.y)>8) cancelLongPress();
 
     if(activePointers.size>=2){
       const pts=[...activePointers.values()].slice(0,2);
@@ -777,7 +159,7 @@ export function initDriftline() {
       }
       pinchLastDist = newDist;
       hasInteracted = true;
-      if(followMode){ followMode=false; document.getElementById('recenterBtn').classList.add('show'); }
+      if(followMode){ followMode=false; $('recenterBtn').classList.add('show'); }
       return;
     }
 
@@ -785,12 +167,13 @@ export function initDriftline() {
     const dx=e.clientX-lastX, dy=e.clientY-lastY;
     if(Math.abs(dx)+Math.abs(dy)>3) dragMoved=true;
     offsetX+=dx; offsetY+=dy; lastX=e.clientX; lastY=e.clientY;
-    if(dragMoved){ hasInteracted=true; if(followMode){ followMode=false; document.getElementById('recenterBtn').classList.add('show'); } }
+    if(dragMoved){ hasInteracted=true; if(followMode){ followMode=false; $('recenterBtn').classList.add('show'); } }
   });
 
   function endPointer(e){
     if(!activePointers.has(e.pointerId)) return;
     activePointers.delete(e.pointerId);
+    cancelLongPress();
     if(activePointers.size===1){
       // one finger lifted out of a pinch — resume single-finger pan from here, no jump, no tap
       const p=[...activePointers.values()][0];
@@ -799,39 +182,41 @@ export function initDriftline() {
     } else if(activePointers.size===0){
       const wasGesture = dragMoved || pinchActive;
       canvas.classList.remove('dragging');
-      if(dragging && !wasGesture) handleTap(e);
-      dragging=false; pinchActive=false; pinchLastDist=0;
+      if(dragging && !wasGesture && !longPressFired) handleTap(e);
+      dragging=false; pinchActive=false; pinchLastDist=0; longPressFired=false;
     }
   }
   canvas.addEventListener('pointerup', endPointer); canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); cancelLongPress(); openCtxMenuAt(e.clientX, e.clientY); });
   canvas.addEventListener('wheel', e=>{
     e.preventDefault(); hasInteracted=true;
     const before=screenToWorld(e.offsetX,e.offsetY);
     scale = clampScale(scale*(e.deltaY<0?1.15:0.87));
     offsetX=e.offsetX-before.x*scale; offsetY=e.offsetY-before.y*scale;
   }, {passive:false});
-  document.getElementById('zoomIn').onclick=()=>zoomStep(1.2);
-  document.getElementById('zoomOut').onclick=()=>zoomStep(0.83);
+  $('zoomIn').onclick=()=>zoomStep(1.2);
+  $('zoomOut').onclick=()=>zoomStep(0.83);
   function zoomStep(f){ hasInteracted=true; const before=screenToWorld(W/2,H/2); scale=clampScale(scale*f);
     offsetX=W/2-before.x*scale; offsetY=H/2-before.y*scale; }
-  document.getElementById('recenterBtn').onclick=()=>{
-    followMode=true; document.getElementById('recenterBtn').classList.remove('show');
+  $('recenterBtn').onclick=()=>{
+    followMode=true; $('recenterBtn').classList.remove('show');
     if(!navActive) fitToState();
   };
   function handleTap(e){
     if(fanOpen) closeFan();
     const best=nodeAtClient(e.clientX, e.clientY);
-    if(best) selectDestination(best);
-    else if(!navActive && document.getElementById('previewSheet').classList.contains('show')) closePreview();
+    if(best) handlePick(best);
+    else if(!navActive && $('previewSheet').classList.contains('show')) cancelTrip();
   }
 
-  /* ============== HAZARDS (data) ============== */
+  /* ============== HAZARDS (reports) ============== */
   function genId(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
   let hazards=[];
   try{
     const raw=localStorage.getItem('driftline_qld_hazards');
     if(raw) hazards=JSON.parse(raw).filter(h=>Date.now()-h.t<20*60*1000).map(h=> h.id ? h : Object.assign({}, h, {id:genId()}));
   }catch(err){ hazards=[]; }
+  graph.recomputeDelays(hazards);
   function saveHazards(){ try{ localStorage.setItem('driftline_qld_hazards', JSON.stringify(hazards)); }catch(err){} }
   const TYPE_LABELS={police:'Police', hazard:'Hazard', crash:'Crash'};
   const TYPE_COLORS={police:'--blue', hazard:'--amber', crash:'--red'};
@@ -842,16 +227,29 @@ export function initDriftline() {
     if(m<60) return m+'m ago';
     return Math.floor(m/60)+'h ago';
   }
-  function addHazard(type){
-    hazards.push({id:genId(), type, x:car.x, y:car.y, t:Date.now()}); saveHazards();
-    const labels={police:'Police reported nearby', hazard:'Hazard reported nearby', crash:'Crash reported nearby'};
-    showToast(labels[type]||'Reported');
+  // Reports are put on the road (snapped to the nearest one), and slow that road down: see graph.recomputeDelays.
+  function addHazardAt(type, wx, wy){
+    const hit=graph.nearestRoadPoint(wx,wy);
+    const x = hit && hit.d<6 ? hit.x : wx, y = hit && hit.d<6 ? hit.y : wy;
+    hazards.push({id:genId(), type, x, y, t:Date.now()}); saveHazards();
+    const where = hit && hit.d<6 ? ' on '+edges[hit.edgeIdx].name : ' nearby';
+    showToast(TYPE_LABELS[type]+' reported'+where);
+    hazardsChanged();
+  }
+  function addHazard(type){ addHazardAt(type, car.x, car.y); }
+  let replanTimer=null;
+  function hazardsChanged(){
+    graph.recomputeDelays(hazards);
     updateBadge();
     if(adminPanel.classList.contains('show')) refreshAdminList();
-    if(navActive) updateRouteReportsPanel();
+    dismissReroute(false);
+    if(navActive){ updateRouteReportsPanel(); checkReroute(); }
+    else if(trip.stops.length && !replanTimer){
+      replanTimer=setTimeout(()=>{ replanTimer=null; if(!navActive && trip.stops.length) planTrip(); }, 60);
+    }
   }
 
-  /* ============== "on the way" report matching ============== */
+  /* ---- "on the way" report matching ---- */
   const ON_ROUTE_THRESHOLD = 7; // world units — roughly the width of a highway corridor at this map's scale
   function pointSegDist(px,py, ax,ay,bx,by){
     const dx=bx-ax, dy=by-ay, lenSq=dx*dx+dy*dy;
@@ -882,8 +280,8 @@ export function initDriftline() {
     </div>`).join('');
   }
   function updateRouteReportsPanel(){
-    const panel=document.getElementById('routeReportsPanel');
-    const list=document.getElementById('routeReportsList');
+    const panel=$('routeReportsPanel');
+    const list=$('routeReportsList');
     if(!navActive || !currentPath){ panel.classList.remove('show'); return; }
     const onRoute = hazardsOnRoute(currentPath, navSegIdx);
     if(onRoute.length>0){ list.innerHTML=renderRouteReportRows(onRoute); panel.classList.add('show'); }
@@ -896,9 +294,9 @@ export function initDriftline() {
     {type:'hazard', label:'Hazard', icon:'<path d="M12 3l9.5 17H2.5L12 3z"/><path d="M12 10v4"/><circle cx="12" cy="17.2" r=".6" fill="currentColor" stroke="none"/>'},
     {type:'crash', label:'Crash', icon:'<path d="M3 12l3-6h12l3 6"/><path d="M3 12v4h2m14-4v4h-2"/><path d="M7 16h10"/><circle cx="7.5" cy="16.5" r="1.4"/><circle cx="16.5" cy="16.5" r="1.4"/>'},
   ];
-  const reportsFab=document.getElementById('reportsFab');
-  const reportsBadge=document.getElementById('reportsBadge');
-  const fanLayer=document.getElementById('reportsFanLayer');
+  const reportsFab=$('reportsFab');
+  const reportsBadge=$('reportsBadge');
+  const fanLayer=$('reportsFanLayer');
   let fanOpen=false;
 
   function updateBadge(){
@@ -927,7 +325,7 @@ export function initDriftline() {
       || algPanel.classList.contains('show')
       || adminPanel.classList.contains('show')
       || menuPanel.classList.contains('show');
-    document.getElementById('controls').classList.toggle('receded', anyOpen);
+    $('controls').classList.toggle('receded', anyOpen);
   }
   function openFan(){
     fanOpen=true; reportsFab.classList.add('fanIsOpen');
@@ -944,19 +342,17 @@ export function initDriftline() {
   }
   function toggleFan(){
     closeAdminPanel(); algPanel.classList.remove('show'); algBtn.classList.remove('active'); closeMenu();
-    if(!fanOpen && document.getElementById('previewSheet').classList.contains('show')) closePreview();
     fanOpen ? closeFan() : openFan();
   }
   reportsFab.addEventListener('click', toggleFan);
   updateBadge();
 
   /* ============== ADMIN PANEL (view / remove existing reports) ============== */
-  const adminBtn=document.getElementById('adminBtn'), adminPanel=document.getElementById('adminPanel');
+  const adminBtn=$('adminBtn'), adminPanel=$('adminPanel');
   let armedType=null, armedTypeTimer=null, armedAll=false, armedAllTimer=null;
-  function armLabel(type){ return type ? 'Tap to confirm' : null; }
   function refreshAdminList(){
-    const wrap=document.getElementById('adminList');
-    const clearAllBtn=document.getElementById('clearAllBtn');
+    const wrap=$('adminList');
+    const clearAllBtn=$('clearAllBtn');
     if(hazards.length===0){
       wrap.innerHTML='<div id="adminEmpty">No active reports</div>';
       clearAllBtn.style.display='none';
@@ -979,7 +375,7 @@ export function initDriftline() {
         <button class="smallGhost${isArmed?' armed':''}" data-cleartype="${type}">${isArmed?'Tap to confirm':'Clear all '+TYPE_LABELS[type].toLowerCase()}</button></div>${rows}</div>`;
     }).join('');
     wrap.querySelectorAll('.reportRemove').forEach(btn=>{
-      btn.onclick=()=>{ hazards=hazards.filter(h=>h.id!==btn.dataset.id); saveHazards(); updateBadge(); refreshAdminList(); };
+      btn.onclick=()=>{ hazards=hazards.filter(h=>h.id!==btn.dataset.id); saveHazards(); hazardsChanged(); };
     });
     wrap.querySelectorAll('[data-cleartype]').forEach(btn=>{
       btn.onclick=()=>{
@@ -987,9 +383,9 @@ export function initDriftline() {
         if(armedType===type){
           clearTimeout(armedTypeTimer); armedType=null;
           const count=hazards.filter(h=>h.type===type).length;
-          hazards=hazards.filter(h=>h.type!==type); saveHazards(); updateBadge();
+          hazards=hazards.filter(h=>h.type!==type); saveHazards();
           showToast('Cleared '+count+' '+TYPE_LABELS[type].toLowerCase()+' report'+(count===1?'':'s'));
-          refreshAdminList();
+          hazardsChanged();
         } else {
           armedType=type; clearTimeout(armedTypeTimer);
           armedTypeTimer=setTimeout(()=>{ armedType=null; refreshAdminList(); }, 4000);
@@ -998,13 +394,13 @@ export function initDriftline() {
       };
     });
   }
-  document.getElementById('clearAllBtn').onclick=()=>{
+  $('clearAllBtn').onclick=()=>{
     if(armedAll){
       clearTimeout(armedAllTimer); armedAll=false;
       const count=hazards.length;
-      hazards=[]; saveHazards(); updateBadge();
+      hazards=[]; saveHazards();
       showToast('Cleared all '+count+' report'+(count===1?'':'s'));
-      refreshAdminList();
+      hazardsChanged();
     } else {
       armedAll=true; clearTimeout(armedAllTimer);
       armedAllTimer=setTimeout(()=>{ armedAll=false; refreshAdminList(); }, 4000);
@@ -1016,7 +412,6 @@ export function initDriftline() {
     adminPanel.classList.add('show'); adminBtn.classList.add('active');
     algPanel.classList.remove('show'); algBtn.classList.remove('active');
     closeFan(); closeMenu();
-    if(document.getElementById('previewSheet').classList.contains('show')) closePreview();
     refreshAdminList();
     if(adminRefreshTimer) clearInterval(adminRefreshTimer);
     adminRefreshTimer=setInterval(refreshAdminList, 5000);
@@ -1032,28 +427,18 @@ export function initDriftline() {
 
   /* ============== TOASTS ============== */
   function showToast(msg,ms){
-    const wrap=document.getElementById('toastWrap'); const el=document.createElement('div');
+    const wrap=$('toastWrap'); const el=document.createElement('div');
     el.className='toast'; el.textContent=msg; wrap.appendChild(el);
     requestAnimationFrame(()=>el.classList.add('show'));
     setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(),300); }, ms||2600);
   }
-
-  /* ============== PREFERENCES (persisted per-browser) ============== */
-  function loadPrefs(){
-    try{ const raw=localStorage.getItem('driftline_qld_prefs'); if(raw) return JSON.parse(raw); }catch(err){}
-    return {};
-  }
-  function savePrefs(patch){
-    try{ const cur=loadPrefs(); localStorage.setItem('driftline_qld_prefs', JSON.stringify(Object.assign(cur, patch))); }catch(err){}
-  }
-  const prefs = loadPrefs();
 
   /* ============== THEME ============== */
   const root=document.documentElement;
   let isDay = typeof prefs.day==='boolean' ? prefs.day : false;
   function setTheme(day){
     root.setAttribute('data-theme', day?'day':'night');
-    const menuSwitch=document.getElementById('menuThemeSwitch');
+    const menuSwitch=$('menuThemeSwitch');
     if(menuSwitch) menuSwitch.classList.toggle('on', !day); // switch reads "Dark mode" — on means night theme active
   }
   setTheme(isDay);
@@ -1061,7 +446,7 @@ export function initDriftline() {
 
   /* ============== ALGORITHM PANEL ============== */
   let currentAlg = (prefs.alg && ALGS[prefs.alg]) ? prefs.alg : 'dijkstra';
-  const algBtn=document.getElementById('algBtn'), algPanel=document.getElementById('algPanel');
+  const algBtn=$('algBtn'), algPanel=$('algPanel');
   function paintPills(){
     document.querySelectorAll('.algPill').forEach(btn=>{
       const a=btn.dataset.alg, on=a===currentAlg;
@@ -1069,170 +454,290 @@ export function initDriftline() {
       btn.style.background = on ? `var(${ALGS[a].color})` : 'transparent';
       btn.style.color = on ? '#04211d' : '';
     });
-    document.getElementById('algDesc').textContent = ALGS[currentAlg].desc;
+    $('algDesc').textContent = ALGS[currentAlg].desc;
   }
   paintPills();
   algBtn.onclick = ()=>{
     const opening = !algPanel.classList.contains('show');
     algPanel.classList.toggle('show', opening); algBtn.classList.toggle('active', opening);
-    if(opening){
-      closeFan(); closeAdminPanel(); closeMenu();
-      if(document.getElementById('previewSheet').classList.contains('show')) closePreview();
-    }
+    if(opening){ closeFan(); closeAdminPanel(); closeMenu(); }
     syncControlsRecede();
   };
-  document.querySelectorAll('.algPill').forEach(btn=>{
-    btn.onclick=()=>{ currentAlg=btn.dataset.alg; paintPills(); savePrefs({alg:currentAlg}); if(lastPoi && !navActive) selectDestination(lastPoi); };
-  });
-  let animateSearch = typeof prefs.animate==='boolean' ? prefs.animate : true;
-  const animSwitch=document.getElementById('animSwitch');
-  animSwitch.classList.toggle('on', animateSearch);
-  animSwitch.onclick=()=>{ animateSearch=!animateSearch; animSwitch.classList.toggle('on', animateSearch); savePrefs({animate:animateSearch}); };
+  function setAlgorithm(key){
+    currentAlg=key; paintPills(); savePrefs({alg:currentAlg});
+    if(trip.stops.length && !navActive) planTrip({forceAnimate:true});
+  }
+  document.querySelectorAll('.algPill').forEach(btn=>{ btn.onclick=()=>setAlgorithm(btn.dataset.alg); });
+  const animSwitch=$('animSwitch');
+  animSwitch.onclick=()=> setSetting('animate', !settings.animate);
+  $('algCompareBtn').onclick=()=> openCompare();
 
-  /* ============== HAMBURGER MENU ============== */
-  const menuBtn=document.getElementById('menuBtn'), menuPanel=document.getElementById('menuPanel');
+  /* ============== HAMBURGER MENU + SETTINGS ============== */
+  const menuBtn=$('menuBtn'), menuPanel=$('menuPanel');
   function openMenu(){
     menuPanel.classList.add('show'); menuBtn.classList.add('open');
     algPanel.classList.remove('show'); algBtn.classList.remove('active');
     closeFan(); closeAdminPanel();
-    if(document.getElementById('previewSheet').classList.contains('show')) closePreview();
     syncControlsRecede();
   }
   function closeMenu(){ menuPanel.classList.remove('show'); menuBtn.classList.remove('open'); syncControlsRecede(); }
   menuBtn.onclick=()=>{ menuPanel.classList.contains('show') ? closeMenu() : openMenu(); };
-  document.getElementById('menuThemeSwitch').onclick=toggleTheme;
+  $('menuThemeSwitch').onclick=toggleTheme;
+
+  function renderSettings(){
+    $('settingsList').innerHTML = SETTING_DEFS.map(d=>
+      `<div class="settingRow"><span>${d.label}</span><div class="switch${settings[d.key]?' on':''}" data-setting="${d.key}"></div></div>`).join('');
+    animSwitch.classList.toggle('on', settings.animate);
+    $('speedHud').classList.toggle('noSign', !settings.speedSigns);
+  }
+  function setSetting(key, value){
+    if(settings[key]===value) return;
+    settings[key]=value; saveSettings(); renderSettings();
+    if(key==='builtUp' || key==='avoidReports'){
+      if(navActive) return;                      // never change the trip mid-drive
+      if(trip.stops.length) planTrip();
+    }
+    if(key==='speedSigns' && navActive) updateSpeedHud(true);
+  }
+  $('settingsList').addEventListener('click', e=>{
+    const sw=e.target.closest('[data-setting]'); if(!sw) return;
+    setSetting(sw.dataset.setting, !settings[sw.dataset.setting]);
+  });
+  $('settingsBtns').addEventListener('click', e=>{
+    const b=e.target.closest('[data-act]'); if(!b) return;
+    if(b.dataset.act==='clearRecents'){ saved.recents=[]; saveSaved(); showToast('Recent destinations cleared'); }
+    if(b.dataset.act==='clearFavs'){ saved.favs=[]; saveSaved(); showToast('Favourites cleared'); }
+    refreshSuggestions();
+  });
+  renderSettings();
+
+  /* ============== FAVOURITES + RECENT DESTINATIONS ============== */
+  const SAVED_KEY='driftline_qld_saved';
+  let saved={favs:[], recents:[]};
+  try{ const raw=localStorage.getItem(SAVED_KEY); if(raw){ const s=JSON.parse(raw); saved={favs:s.favs||[], recents:s.recents||[]}; } }catch(err){}
+  function saveSaved(){ try{ localStorage.setItem(SAVED_KEY, JSON.stringify(saved)); }catch(err){} }
+  // A stable key for a town or extra place (dropped pins are not saved).
+  function poiKey(poi){
+    if(poi.isPin) return null;
+    const p = poi.placeRef || (poi.nodeId!==undefined ? poi : null);
+    return p ? 'p:'+p.name+'@'+p.lat.toFixed(4)+','+p.lon.toFixed(4) : 'n:'+poi.name;
+  }
+  function resolveKey(k){
+    if(k.startsWith('n:')){ const id=NID[k.slice(2)]; return id===undefined ? null : nodes[id]; }
+    const m=/^p:(.*)@(-?[\d.]+),(-?[\d.]+)$/.exec(k); if(!m) return null;
+    return places.find(p=>p.name===m[1] && p.lat.toFixed(4)===m[2] && p.lon.toFixed(4)===m[3]) || null;
+  }
+  const isFav = poi=>{ const k=poiKey(poi); return !!k && saved.favs.some(f=>f.k===k); };
+  function toggleFav(poi){
+    const k=poiKey(poi); if(!k) return;
+    if(saved.favs.some(f=>f.k===k)){ saved.favs=saved.favs.filter(f=>f.k!==k); showToast('Removed '+poi.name+' from favourites'); }
+    else { saved.favs.push({k, name:poi.name}); showToast('Added '+poi.name+' to favourites'); }
+    saveSaved(); updateFavBtn();
+  }
+  function pushRecent(poi){
+    const k=poiKey(poi); if(!k) return;
+    saved.recents=[{k, name:poi.name}, ...saved.recents.filter(r=>r.k!==k)].slice(0,8);
+    saveSaved();
+  }
 
   /* ============== SEARCH ============== */
-  const searchInput=document.getElementById('searchInput'), suggestBox=document.getElementById('suggestBox');
+  const searchInput=$('searchInput'), suggestBox=$('suggestBox'), addStopBtn=$('addStopBtn');
+  // 'dest' replaces the trip with the picked place, 'add' appends it as another stop, 'start' sets the start
+  let searchMode='dest';
+  function setSearchMode(m){
+    searchMode=m;
+    searchInput.placeholder = {dest:'Where to in Queensland?', add:'Add another destination…', start:'Search for a start location…'}[m];
+    addStopBtn.classList.toggle('active', m==='add');
+    renderTripPanel();
+  }
   function pinSvg(){ return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 1114 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>'; }
-  function renderSuggestions(list, q){
-    const withDist = list.map(n=>({ n, d: Math.hypot(n.x-car.x,n.y-car.y)*KM_PER_UNIT }));
+  let suggestItems=[];
+  const distFromCar = n=> Math.hypot(n.x-car.x,n.y-car.y)*KM_PER_UNIT;
+  function buildSuggestions(q){
+    const items=[];
+    const asItem = poi=>({ poi, d:distFromCar(poi) });
+    if(!q){
+      const favs=saved.favs.map(f=>resolveKey(f.k)).filter(Boolean);
+      const recents=saved.recents.filter(r=>!saved.favs.some(f=>f.k===r.k)).map(r=>resolveKey(r.k)).filter(Boolean);
+      if(favs.length){ items.push({header:'Favourites'}); favs.forEach(p=>items.push(asItem(p))); }
+      if(recents.length){ items.push({header:'Recent'}); recents.forEach(p=>items.push(asItem(p))); }
+      const room = Math.max(10, 40-items.length);
+      const nearby = nodes.filter(n=>!n.virtual).map(asItem).sort((a,b)=>a.d-b.d).slice(0,room);
+      if(items.length) items.push({header:'Nearby towns'});
+      items.push(...nearby);
+      return items;
+    }
     // exact name first, then name-prefix matches, then nearest first
     const rankMatch = n=>{ const nm=n.name.toLowerCase(); return nm===q ? 2 : nm.startsWith(q) ? 1 : 0; };
-    withDist.sort((a,b)=> (q ? rankMatch(b.n)-rankMatch(a.n) : 0) || a.d-b.d);
-    const shown = withDist.slice(0,40);
-    suggestBox.innerHTML=shown.map(({n,d},i)=>{
-      const kind = n.nodeId!==undefined ? n.label+' · ' : '';
-      return `<div class="suggestItem" data-i="${i}"><div class="suggestIcon">${pinSvg()}</div>
-        <div><div class="suggestName">${n.name}</div><div class="suggestSub">${kind}${Math.round(d)} km away (straight line)</div></div></div>`;
-    }).join('');
-    suggestBox.classList.toggle('show', list.length>0);
-    [...suggestBox.querySelectorAll('.suggestItem')].forEach(el=>{
-      el.onclick=()=>{ const n=shown[+el.dataset.i].n; searchInput.value=''; suggestBox.classList.remove('show'); selectDestination(n); };
-    });
+    const matches = nodes.filter(n=>!n.virtual && n.name.toLowerCase().includes(q))
+      .concat(places.filter(p=>p.name.toLowerCase().includes(q)))
+      .map(asItem);
+    matches.sort((a,b)=> (rankMatch(b.poi)-rankMatch(a.poi)) || a.d-b.d);
+    return matches.slice(0,40);
   }
-  function matchesFor(q){ return q ? nodes.filter(n=>!n.virtual && n.name.toLowerCase().includes(q)).concat(places.filter(p=>p.name.toLowerCase().includes(q))) : nodes.filter(n=>!n.virtual); }
-  searchInput.addEventListener('input', ()=>{
-    const q=searchInput.value.trim().toLowerCase();
-    renderSuggestions(matchesFor(q), q);
+  function renderSuggestions(q){
+    suggestItems=buildSuggestions(q);
+    suggestBox.innerHTML=suggestItems.map((it,i)=>{
+      if(it.header) return `<div class="suggestHead">${it.header}</div>`;
+      const n=it.poi, kind = n.nodeId!==undefined ? n.label+' · ' : '', fav=isFav(n);
+      return `<div class="suggestItem" data-i="${i}"><div class="suggestIcon">${pinSvg()}</div>
+        <div class="suggestBody"><div class="suggestName">${esc(n.name)}</div><div class="suggestSub">${kind}${Math.round(it.d)} km away (straight line)</div></div>
+        <button class="starBtn${fav?' on':''}" data-star="${i}" aria-label="${fav?'Remove from':'Add to'} favourites">${fav?'★':'☆'}</button></div>`;
+    }).join('');
+    suggestBox.classList.toggle('show', suggestItems.length>0);
+  }
+  const currentQuery = ()=> searchInput.value.trim().toLowerCase();
+  function refreshSuggestions(){ if(suggestBox.classList.contains('show')) renderSuggestions(currentQuery()); }
+  suggestBox.addEventListener('click', e=>{
+    const star=e.target.closest('[data-star]');
+    if(star){ e.stopPropagation(); toggleFav(suggestItems[+star.dataset.star].poi); renderSuggestions(currentQuery()); return; }
+    const row=e.target.closest('[data-i]'); if(!row) return;
+    const it=suggestItems[+row.dataset.i]; if(!it || !it.poi) return;
+    searchInput.value=''; suggestBox.classList.remove('show');
+    handlePick(it.poi);
   });
+  searchInput.addEventListener('input', ()=> renderSuggestions(currentQuery()));
   searchInput.addEventListener('focus', ()=>{
     algPanel.classList.remove('show'); algBtn.classList.remove('active');
     closeAdminPanel(); closeFan(); closeMenu();
-    if(document.getElementById('previewSheet').classList.contains('show')) closePreview();
-    const q=searchInput.value.trim().toLowerCase();
-    renderSuggestions(matchesFor(q), q);
+    renderSuggestions(currentQuery());
   });
-  function handleDocumentClick(e){ if(!suggestBox.contains(e.target) && e.target!==searchInput) suggestBox.classList.remove('show'); }
+  function handleDocumentClick(e){
+    if(!suggestBox.contains(e.target) && e.target!==searchInput && !(e.target.closest && e.target.closest('#addStopBtn, #tripPanel'))) suggestBox.classList.remove('show');
+  }
   document.addEventListener('click', handleDocumentClick);
   cleanupFns.push(()=> document.removeEventListener('click', handleDocumentClick));
 
-  /* ============== ROUTE / NAV STATE ============== */
-  let currentDestination=null, currentPath=null, lastPoi=null;
+  // A place was picked (search result, tap on the map, or the long-press menu).
+  function handlePick(poi){
+    if(searchMode==='start'){
+      const node = poi.nodeId!==undefined ? graph.ensurePlaceNode(poi) : poi;
+      setSearchMode('dest'); setCarAtNode(node);
+      return;
+    }
+    chooseDestination(poi, { append: searchMode==='add' });
+  }
+
+  /* ============== TRIP STATE ============== */
+  // trip.stops = [{ poi, node }] in visit order. legs[i] = the independent search from the previous
+  // stop (or the start) to stop i. currentPath is every leg's path joined; legEndSeg[k] is the index
+  // of leg k's last road in it.
+  const trip = { stops:[] };
+  let legs=[], currentPath=null, legEndSeg=[], currentDestination=null;
   let navActive=false, navFrac=0, navSegIdx=0, playbackSeconds=15;
   let cumLen=[], cumTime=[], segLens=[], segTimes=[];
-  let searchAnim=null, searchTimer=null;
+  let navStops=[], navLegs=[], navStopK=0, navPause=0, curSpeed=0, curLimit=100;
+  let searchAnim=null, searchAnimsDone=[], searchTimer=null, animRunning=false, planToken=0;
+  const legCache=new Map();
 
-  function nearestNodeTo(x,y){ let best=0,bestD=Infinity; nodes.forEach(n=>{ const d=Math.hypot(n.x-x,n.y-y); if(d<bestD){bestD=d;best=n.id;} }); return best; }
-
-  // Extra places are not in the road graph until you pick one: it gets a node plus a short access
-  // road to the nearest town, so every routing algorithm can reach it like any other destination.
-  function ensurePlaceNode(place){
-    if(place.nodeId!==null) return nodes[place.nodeId];
-    // walk up the local-road tree to the first town / already-created place, then build back down
-    const chain=[]; let cur=place;
-    while(cur && cur.nodeId===null){ chain.push(cur); cur = cur.link.kind==='place' ? places[cur.link.idx] : null; }
-    for(let i=chain.length-1; i>=0; i--){
-      const p=chain[i];
-      const parent = p.link.kind==='node' ? nodes[p.link.idx] : nodes[places[p.link.idx].nodeId];
-      const node={ id:nodes.length, name:p.name, lat:p.lat, lon:p.lon, rank:p.rank, x:p.x, y:p.y, virtual:true };
-      nodes.push(node); adj.set(node.id, []);
-      edges.push(finishEdge({ a:parent.id, b:node.id, type:'access', name:'Local roads to '+p.name, limit:p.kind==='suburb' ? SPEED.suburb : SPEED.access }, [parent,node]));
-      const edgeIdx=edges.length-1;
-      adj.get(parent.id).push({to:node.id, edgeIdx}); adj.get(node.id).push({to:parent.id, edgeIdx});
-      p.nodeId=node.id;
-    }
-    return nodes[place.nodeId];
+  const fmtDuration = sec=>{ const m=Math.round(sec/60), h=Math.floor(m/60); return h>0 ? `${h} h ${m%60} min` : `${m} min`; };
+  const nearestNodeTo = (x,y)=> graph.nearestNodeTo(x,y);
+  function startLabel(){
+    const n=nodes[nearestNodeTo(car.x,car.y)];
+    return n.isPin ? 'Near '+graph.nearestTownName(car.x,car.y) : n.name;
   }
 
-  function selectDestination(poi){
-    if(poi.nodeId!==undefined) poi=ensurePlaceNode(poi);
+  function chooseDestination(poi, {append=false}={}){
+    const node = poi.nodeId!==undefined ? graph.ensurePlaceNode(poi) : poi;
+    pushRecent(poi);
+    const stop={poi, node};
+    if(append && trip.stops.length) trip.stops.push(stop); else trip.stops=[stop];
     suggestBox.classList.remove('show');
-    const startNode = nearestNodeTo(car.x, car.y);
-    if(poi.id===startNode){ showToast("You're already in "+poi.name); return; }
-    lastPoi = poi;
-    const alg = ALGS[currentAlg];
-    const result = alg.fn(startNode, poi.id);
-    if(!result){ showToast("No route found to "+poi.name); return; }
-    const optimal = runDijkstra(startNode, poi.id);
-
-    currentDestination = poi; currentPath = result.path;
-
-    function settle(){
-      document.getElementById('previewTitle').textContent = poi.name;
-      const mins = Math.round(result.totalSec/60);
-      const hrs = Math.floor(mins/60), rem = mins%60;
-      const timeStr = hrs>0 ? `${hrs} h ${rem} min` : `${rem} min`;
-      document.getElementById('previewMeta').textContent = `${result.totalLenKm.toFixed(0)} km · ${timeStr} · ${alg.label} · ${result.nodesExplored} towns explored`;
-      const flag = document.getElementById('previewFlag');
-      if(optimal && result.totalSec > optimal.totalSec*1.02){
-        const pct = Math.round((result.totalSec/optimal.totalSec-1)*100);
-        flag.textContent = `⚠ ${pct}% slower than the fastest route`;
-        flag.style.color = 'var(--amber)';
-      } else {
-        flag.textContent = '✓ fastest route by travel time';
-        flag.style.color = 'var(--route)';
-      }
-      const onRoute = hazardsOnRoute(result.path, 0);
-      const onRouteWrap = document.getElementById('onRouteWrap');
-      if(onRoute.length>0){
-        document.getElementById('onRouteList').innerHTML = renderRouteReportRows(onRoute);
-        onRouteWrap.classList.add('show');
-      } else {
-        onRouteWrap.classList.remove('show'); document.getElementById('onRouteList').innerHTML='';
-      }
-      document.getElementById('previewSheet').classList.add('show');
-      document.getElementById('reportsFabWrap').classList.add('behindSheet');
-      document.getElementById('reportsFanLayer').classList.add('behindSheet');
-    }
-
-    if(animateSearch && result.trace.length>1){
-      playSearchAnimation(result.trace, alg.color, settle, result.wave);
-    } else {
-      settle();
-    }
+    setSearchMode('dest');
+    planTrip({forceAnimate:true});
   }
 
-  // Neon-green search lines. Step algorithms grow the road each expanded town was reached by; Wave
-  // grows every road at once, driven by a shared clock (simT) instead of by trace steps.
+  function computeLeg(fromId, toId){
+    const key=[fromId,toId,currentAlg,graph.graphVersion(),graph.delayVersion(),settings.builtUp,settings.avoidReports].join('|');
+    const hit=legCache.get(key);
+    if(hit) return Object.assign({}, hit, {cached:true});
+    const result=ALGS[currentAlg].fn(fromId,toId);
+    if(!result) return null;
+    const leg={fromId, toId, result, optimal:runDijkstra(fromId,toId)};
+    if(legCache.size>150) legCache.clear();
+    legCache.set(key, leg);
+    return Object.assign({}, leg, {cached:false});
+  }
+
+  function cancelSearchAnimation(){
+    if(searchTimer){ clearInterval(searchTimer); searchTimer=null; }
+    searchAnim=null; searchAnimsDone=[]; animRunning=false; planToken++;
+  }
+  function clearPlan(){
+    cancelSearchAnimation();
+    legs=[]; currentPath=null; legEndSeg=[]; currentDestination=null;
+    setPreviewVisible(false);
+  }
+  function cancelTrip(){
+    trip.stops=[]; clearPlan(); dismissReroute(false);
+    if(searchMode!=='dest') setSearchMode('dest'); else renderTripPanel();
+  }
+
+  // Search every leg (start -> stop 1 -> stop 2 ...) independently with the chosen algorithm.
+  // Legs already searched (same road network, reports and settings) are reused; only new ones animate.
+  function planTrip({forceAnimate=false, alwaysAnimate=false}={}){
+    cancelSearchAnimation();
+    const token=planToken;
+    if(!trip.stops.length){ clearPlan(); renderTripPanel(); return; }
+    let from=nearestNodeTo(car.x,car.y);
+    const computed=[], kept=[];
+    for(const stop of trip.stops){
+      const to=stop.node.id;
+      if(to===from){ showToast(kept.length ? stop.poi.name+' is the same as the stop before it' : "You're already in "+stop.poi.name); continue; }
+      const leg=computeLeg(from,to);
+      if(!leg){ showToast('No route to '+stop.poi.name); continue; }
+      computed.push(Object.assign(leg,{stop})); kept.push(stop); from=to;
+    }
+    trip.stops=kept;
+    if(!computed.length){ clearPlan(); renderTripPanel(); return; }
+    legs=computed;
+    currentPath=[]; legEndSeg=[];
+    legs.forEach(l=>{ l.result.path.forEach(s=>currentPath.push(s)); legEndSeg.push(currentPath.length-1); });
+    currentDestination=legs[legs.length-1].stop.node;
+    renderTripPanel();
+
+    const animate = (settings.animate || alwaysAnimate);
+    const toAnimate = animate ? legs.filter(l=> forceAnimate ? (alwaysAnimate || !l.cached) : !l.cached) : [];
+    legs.forEach(l=>{ if(!toAnimate.includes(l) && l.result.trace.length>1) searchAnimsDone.push(staticAnim(l.result)); });
+    if(!toAnimate.length){ settlePreview(); return; }
+    animRunning=true; setPreviewVisible(false);
+    const pace = Math.min(1, 1.8/toAnimate.length);
+    const playLeg=i=>{
+      if(token!==planToken) return;
+      if(i>=toAnimate.length){ animRunning=false; settlePreview(); return; }
+      const r=toAnimate[i].result;
+      if(r.trace.length<=1){ playLeg(i+1); return; }
+      playSearchAnimation(r.trace, ()=>{
+        if(token!==planToken) return;
+        searchAnimsDone.push(searchAnim); searchAnim=null;
+        playLeg(i+1);
+      }, r.wave, pace);
+    };
+    playLeg(0);
+  }
+
+  /* ---- search animation: neon lines growing along the roads being searched ---- */
+  // Step algorithms grow the road each expanded town was reached by; Wave grows every road at once,
+  // driven by a shared clock (simT) instead of by trace steps.
   const NEON = '#39FF14';
-  function playSearchAnimation(trace, colorVar, onDone, wave){
+  // pace < 1 speeds a leg up, so a many-legged trip still settles in a few seconds
+  function playSearchAnimation(trace, onDone, wave, pace=1){
     if(searchTimer) clearInterval(searchTimer);
     searchAnim = { segs:new Map(), wave:null, done:false, endAt:0 };
     const finish = ()=>{ clearInterval(searchTimer); searchTimer=null; searchAnim.done=true; onDone(); };
     if(wave){
-      const durMs = 4200;
+      const durMs = 4200*pace;
       wave.segs.forEach((seg,i)=> searchAnim.segs.set(i, seg));
       searchAnim.wave = { T:wave.T, startMs:performance.now(), durMs };
       searchTimer = setInterval(()=>{ if(performance.now()-searchAnim.wave.startMs >= durMs+250) finish(); }, 50);
       return;
     }
     let idx=0;
-    const stepMs = Math.max(20, Math.min(140, 2600/trace.length));
-    const growMs = Math.max(300, Math.min(800, stepMs*5)); // how long each road takes to light up
+    const stepMs = Math.max(8, Math.min(140, 2600*pace/trace.length));
+    const growMs = Math.max(150, Math.min(800, stepMs*5)); // how long each road takes to light up
     // Deep searches (IDS / IDA*) can revisit towns thousands of times on a map this size, so
     // play several trace steps per tick to keep the whole animation to a few seconds.
-    const perTick = Math.max(1, Math.ceil(trace.length*stepMs/3200));
+    const perTick = Math.max(1, Math.ceil(trace.length*stepMs/(3200*pace)));
     searchTimer = setInterval(()=>{
       if(idx>=trace.length){
         if(!searchAnim.endAt) searchAnim.endAt = performance.now()+growMs; // let the last roads finish growing
@@ -1254,6 +759,17 @@ export function initDriftline() {
       }
     }, stepMs);
   }
+  // A finished search, fully grown (used for legs that were not re-animated).
+  function staticAnim(result){
+    const a={ segs:new Map(), wave:null, done:true, full:true };
+    if(result.wave){ result.wave.segs.forEach((s,i)=>a.segs.set(i,s)); a.wave={ T:result.wave.T, static:true }; }
+    else result.trace.forEach(step=>{
+      if(step.edgeIdx===undefined) return;
+      const fwd=edges[step.edgeIdx].a===step.from;
+      a.segs.set(step.edgeIdx*2+(fwd?1:0), { edgeIdx:step.edgeIdx, fwd });
+    });
+    return a;
+  }
   // add the first `dist` (world units) of edge e, travelling forward (a->b) or not, to the current path
   function tracePartial(e, forward, dist){
     const pts=e.pts, cum=e.cum, n=pts.length;
@@ -1269,29 +785,211 @@ export function initDriftline() {
     }
   }
 
-  function closePreview(){
-    document.getElementById('previewSheet').classList.remove('show');
-    document.getElementById('onRouteWrap').classList.remove('show');
-    document.getElementById('reportsFabWrap').classList.remove('behindSheet');
-    document.getElementById('reportsFanLayer').classList.remove('behindSheet');
-    currentDestination=null; currentPath=null; searchAnim=null;
-    if(searchTimer){ clearInterval(searchTimer); searchTimer=null; }
+  /* ---- trip panel (start, stops, reorder) ---- */
+  const tripPanel=$('tripPanel');
+  function renderTripPanel(){
+    const show = !navActive && (trip.stops.length>=2 || (trip.stops.length>=1 && searchMode!=='dest'));
+    addStopBtn.classList.toggle('disabled', trip.stops.length===0);
+    if(!show){ tripPanel.classList.remove('show'); tripPanel.innerHTML=''; return; }
+    const aligned = legs.length===trip.stops.length;
+    const totalSec = legs.reduce((s,l)=>s+l.result.totalSec,0), totalKm = legs.reduce((s,l)=>s+l.result.totalLenKm,0);
+    const rows = trip.stops.map((s,i)=>{
+      const l = aligned ? legs[i] : null;
+      const sub = l ? `<div class="tripSub">${Math.round(l.result.totalLenKm)} km · ${fmtDuration(l.result.totalSec)}</div>` : '';
+      return `<div class="tripRow" draggable="true" data-i="${i}"><span class="tripGrip" title="Drag to reorder">⋮⋮</span><span class="tripNum">${i+1}</span>
+        <div class="tripName">${esc(s.poi.name)}${sub}</div>
+        <button class="tripBtn" data-act="up" data-i="${i}" aria-label="Move up"${i===0?' disabled':''}>▲</button>
+        <button class="tripBtn" data-act="down" data-i="${i}" aria-label="Move down"${i===trip.stops.length-1?' disabled':''}>▼</button>
+        <button class="tripBtn" data-act="remove" data-i="${i}" aria-label="Remove stop">✕</button></div>`;
+    }).join('');
+    const totals = aligned ? `${Math.round(totalKm)} km · ${fmtDuration(totalSec)}` : '';
+    tripPanel.innerHTML = `<div class="tripHead"><b>Road trip · ${trip.stops.length} stop${trip.stops.length===1?'':'s'}</b><span class="tripTotals">${totals}</span></div>
+      <div class="tripRow tripStart" data-act="pickStart"><span class="tripPin">S</span><div class="tripName">Start · ${esc(startLabel())}<div class="tripSub">${searchMode==='start' ? 'Search or tap a place to start from' : 'Tap to change, or long-press the map'}</div></div></div>
+      ${rows}
+      <button class="tripAdd" data-act="addStop">+ Add destination</button>`;
+    tripPanel.classList.add('show');
   }
-  document.getElementById('cancelPreview').onclick=closePreview;
-  document.getElementById('startDrive').onclick=startNavigation;
-  document.getElementById('exitBtn').onclick=endNavigation;
+  function moveStop(from, to){
+    if(from===to || to<0 || to>=trip.stops.length || from<0 || from>=trip.stops.length) return;
+    const [s]=trip.stops.splice(from,1); trip.stops.splice(to,0,s);
+    planTrip();
+  }
+  function removeStop(i){
+    trip.stops.splice(i,1);
+    if(!trip.stops.length){ cancelTrip(); return; }
+    planTrip();
+  }
+  tripPanel.addEventListener('click', e=>{
+    const t=e.target.closest('[data-act]'); if(!t) return;
+    const i=+t.dataset.i;
+    if(t.dataset.act==='up') moveStop(i,i-1);
+    else if(t.dataset.act==='down') moveStop(i,i+1);
+    else if(t.dataset.act==='remove') removeStop(i);
+    else if(t.dataset.act==='addStop') beginAddStop();
+    else if(t.dataset.act==='pickStart'){ setSearchMode('start'); searchInput.value=''; searchInput.focus(); }
+  });
+  let dragFrom=null;
+  tripPanel.addEventListener('dragstart', e=>{
+    const row=e.target.closest('.tripRow[data-i]'); if(!row) return;
+    dragFrom=+row.dataset.i; row.classList.add('dragging');
+    if(e.dataTransfer){ e.dataTransfer.effectAllowed='move'; try{ e.dataTransfer.setData('text/plain', String(dragFrom)); }catch(err){} }
+  });
+  tripPanel.addEventListener('dragover', e=>{
+    const row=e.target.closest('.tripRow[data-i]'); if(!row || dragFrom===null) return;
+    e.preventDefault();
+    tripPanel.querySelectorAll('.dragOver').forEach(r=>r.classList.remove('dragOver'));
+    row.classList.add('dragOver');
+  });
+  tripPanel.addEventListener('drop', e=>{
+    const row=e.target.closest('.tripRow[data-i]'); if(!row || dragFrom===null) return;
+    e.preventDefault(); const from=dragFrom; dragFrom=null; moveStop(from, +row.dataset.i);
+  });
+  tripPanel.addEventListener('dragend', ()=>{ dragFrom=null; renderTripPanel(); });
 
-  function startNavigation(){
-    document.getElementById('previewSheet').classList.remove('show');
-    document.getElementById('reportsFabWrap').classList.remove('behindSheet');
-    document.getElementById('reportsFanLayer').classList.remove('behindSheet');
-    document.getElementById('turnCard').classList.add('show');
-    document.getElementById('driveHud').classList.add('show');
-    document.getElementById('searchRow').style.visibility='hidden';
-    algPanel.classList.remove('show'); algBtn.classList.remove('active');
-    closeFan(); closeAdminPanel(); closeMenu();
-    searchAnim=null;
+  function beginAddStop(){
+    if(!trip.stops.length){ showToast('Search for a destination first, then press + to add another'); searchInput.focus(); return; }
+    setSearchMode('add'); searchInput.value=''; searchInput.focus();
+  }
+  addStopBtn.onclick=beginAddStop;
 
+  /* ---- preview sheet ---- */
+  function setPreviewVisible(on){
+    $('previewSheet').classList.toggle('show', on);
+    $('reportsFabWrap').classList.toggle('behindSheet', on);
+    $('reportsFanLayer').classList.toggle('behindSheet', on);
+    if(!on) $('onRouteWrap').classList.remove('show');
+  }
+  function updateFavBtn(){
+    const btn=$('favBtn');
+    const single = trip.stops.length===1;
+    btn.style.display = single ? '' : 'none';
+    if(single){ const fav=isFav(trip.stops[0].poi); btn.textContent=fav?'★':'☆'; btn.classList.toggle('on', fav); }
+  }
+  function settlePreview(){
+    if(!legs.length) return;
+    const alg=ALGS[currentAlg];
+    const totalSec=legs.reduce((s,l)=>s+l.result.totalSec,0), totalKm=legs.reduce((s,l)=>s+l.result.totalLenKm,0);
+    const explored=legs.reduce((s,l)=>s+l.result.nodesExplored,0);
+    const optimalSec=legs.reduce((s,l)=>s+(l.optimal?l.optimal.totalSec:l.result.totalSec),0);
+    const multi=trip.stops.length>1;
+    $('previewTitle').textContent = multi ? `Road trip · ${trip.stops.length} stops` : trip.stops[0].poi.name;
+    $('previewMeta').textContent = `${totalKm.toFixed(0)} km · ${fmtDuration(totalSec)} · ${alg.label} · ${explored} towns explored`;
+    const legList=$('legList');
+    if(multi){
+      let prev=startLabel();
+      legList.innerHTML = legs.map(l=>{
+        const row=`<div class="legRow"><span>${esc(prev)} → ${esc(l.stop.poi.name)}</span><span>${Math.round(l.result.totalLenKm)} km · ${fmtDuration(l.result.totalSec)}</span></div>`;
+        prev=l.stop.poi.name; return row;
+      }).join('');
+      legList.classList.add('show');
+    } else { legList.innerHTML=''; legList.classList.remove('show'); }
+    const flag=$('previewFlag');
+    if(totalSec>optimalSec*1.02){
+      flag.textContent=`⚠ ${Math.round((totalSec/optimalSec-1)*100)}% slower than the fastest route`; flag.style.color='var(--amber)';
+    } else { flag.textContent='✓ fastest route by travel time'; flag.style.color='var(--route)'; }
+    let delay=0; if(settings.avoidReports) currentPath.forEach(seg=>{ delay+=edges[seg.edgeIdx].delaySec||0; });
+    const note=$('delayNote');
+    if(delay>0){ note.textContent=`⏱ Includes about ${Math.max(1,Math.round(delay/60))} min of delays from reports on this route`; note.classList.add('show'); }
+    else { note.textContent=''; note.classList.remove('show'); }
+    const onRoute=hazardsOnRoute(currentPath,0), wrap=$('onRouteWrap');
+    if(onRoute.length>0){ $('onRouteList').innerHTML=renderRouteReportRows(onRoute); wrap.classList.add('show'); }
+    else { wrap.classList.remove('show'); $('onRouteList').innerHTML=''; }
+    updateFavBtn();
+    setPreviewVisible(true);
+  }
+  $('cancelPreview').onclick=cancelTrip;
+  $('startDrive').onclick=()=> startNavigation();
+  $('compareBtn').onclick=()=> openCompare();
+  $('favBtn').onclick=()=>{ if(trip.stops.length===1) toggleFav(trip.stops[0].poi); };
+
+  /* ============== COMPARE ALL ALGORITHMS ============== */
+  const comparePanel=$('comparePanel');
+  function openCompare(){
+    if(!trip.stops.length || !legs.length){ showToast('Pick a destination first, then compare the algorithms'); return; }
+    const pairs=legs.map(l=>({from:l.fromId, to:l.toId}));
+    const rows=Object.keys(ALGS).map(key=>{
+      const r={key, explored:0, km:0, sec:0, steps:0};
+      pairs.forEach(p=>{ const res=ALGS[key].fn(p.from,p.to); if(!res){ r.failed=true; return; } r.explored+=res.nodesExplored; r.km+=res.totalLenKm; r.sec+=res.totalSec; r.steps+=res.trace.length; });
+      return r;
+    }).filter(r=>!r.failed);
+    const best=f=>Math.min(...rows.map(f));
+    const bSec=best(r=>r.sec), bKm=best(r=>r.km), bExp=best(r=>r.explored);
+    const names=[startLabel(), ...legs.map(l=>l.stop.poi.name)].join(' → ');
+    $('cmpSub').textContent = `${names} · ${pairs.length} leg${pairs.length===1?'':'s'}, each searched independently`;
+    $('cmpBody').innerHTML = `<table class="cmpTable"><thead><tr><th>Algorithm</th><th>Towns explored</th><th>Distance</th><th>Drive time</th><th></th></tr></thead><tbody>${
+      rows.map(r=>{
+        const slower = r.sec>bSec*1.005 ? `<span class="cmpNote">+${Math.round((r.sec/bSec-1)*100)}% vs fastest</span>` : '';
+        return `<tr class="${r.key===currentAlg?'cmpSel':''}"><td><span class="cmpAlg"><span class="cmpSwatch" style="background:var(${ALGS[r.key].color})"></span>${ALGS[r.key].label}</span></td>
+          <td class="${r.explored===bExp?'best':''}">${r.explored}<span class="cmpNote">${r.steps} steps</span></td>
+          <td class="${r.km<=bKm*1.0005?'best':''}">${Math.round(r.km)} km</td>
+          <td class="${r.sec<=bSec*1.0005?'best':''}">${fmtDuration(r.sec)}${slower}</td>
+          <td><button class="cmpReplay" data-act="replay" data-alg="${r.key}">Replay</button></td></tr>`;
+      }).join('')}</tbody></table>`;
+    comparePanel.classList.add('show');
+  }
+  function closeCompare(){ comparePanel.classList.remove('show'); }
+  $('cmpClose').onclick=closeCompare;
+  $('cmpBody').addEventListener('click', e=>{
+    const b=e.target.closest('[data-act="replay"]'); if(!b) return;
+    closeCompare();
+    currentAlg=b.dataset.alg; paintPills(); savePrefs({alg:currentAlg});
+    planTrip({forceAnimate:true, alwaysAnimate:true});
+  });
+
+  /* ============== LONG-PRESS / RIGHT-CLICK MENU (set start, add destination, report) ============== */
+  const ctxMenu=$('ctxMenu');
+  let ctxWorld=null, ctxPoi=null;
+  function openCtxMenuAt(cx, cy){
+    const rect=canvas.getBoundingClientRect(); ctxWorld=screenToWorld(cx-rect.left, cy-rect.top);
+    ctxPoi=nodeAtClient(cx,cy);
+    const where = ctxPoi ? ctxPoi.name : 'Near '+graph.nearestTownName(ctxWorld.x, ctxWorld.y);
+    const dot = v=>`<span class="ctxDot" style="background:var(${v})"></span>`;
+    ctxMenu.innerHTML = `<div class="ctxHead">${esc(where)}</div>
+      <div class="ctxItem${navActive?' disabled':''}" data-act="setStart">${dot('--blue')}Set start here</div>
+      ${ctxPoi ? `<div class="ctxItem" data-act="addDest">${dot('--route')}${trip.stops.length ? 'Add as a stop' : 'Go to '+esc(ctxPoi.name)}</div>` : ''}
+      <div class="ctxSep"></div>
+      <div class="ctxItem" data-act="report" data-type="crash">${dot('--red')}Report a crash here</div>
+      <div class="ctxItem" data-act="report" data-type="hazard">${dot('--amber')}Report a hazard here</div>
+      <div class="ctxItem" data-act="report" data-type="police">${dot('--blue')}Report police here</div>`;
+    ctxMenu.style.left=Math.max(8, Math.min(cx, window.innerWidth-250))+'px';
+    ctxMenu.style.top=Math.max(8, Math.min(cy, window.innerHeight-260))+'px';
+    ctxMenu.classList.add('show');
+  }
+  function closeCtxMenu(){ ctxMenu.classList.remove('show'); }
+  ctxMenu.addEventListener('click', e=>{
+    const it=e.target.closest('[data-act]'); if(!it) return;
+    const act=it.dataset.act, w=ctxWorld, poi=ctxPoi;
+    closeCtxMenu();
+    if(act==='setStart') setStartAtWorld(w.x,w.y);
+    else if(act==='addDest' && poi) chooseDestination(poi, {append: trip.stops.length>0});
+    else if(act==='report') addHazardAt(it.dataset.type, w.x, w.y);
+  });
+  function handleOutsidePointer(e){ if(ctxMenu.classList.contains('show') && !ctxMenu.contains(e.target)) closeCtxMenu(); }
+  document.addEventListener('pointerdown', handleOutsidePointer);
+  cleanupFns.push(()=> document.removeEventListener('pointerdown', handleOutsidePointer));
+
+  // Drop the start pin on the nearest road (splitting it there), or on a chosen town/place.
+  function setStartAtWorld(wx, wy){
+    if(navActive){ showToast("Can't move the start during a drive"); return; }
+    const hit=graph.nearestRoadPoint(wx,wy);
+    if(!hit){ showToast('No road found there'); return; }
+    setCarAtNode(graph.splitEdgeAt(hit.edgeIdx, hit.dist));
+  }
+  function setCarAtNode(node){
+    if(navActive) return;
+    car.x=node.x; car.y=node.y; car.heading=-Math.PI/2;
+    graph.recomputeDelays(hazards);       // a split road makes new edges: give them their reports
+    legCache.clear();
+    hasInteracted=true;
+    const sx=car.x*scale+offsetX, sy=car.y*scale+offsetY;
+    if(sx<40 || sx>W-40 || sy<120 || sy>H-120) centerOn(car.x,car.y);
+    showToast('Start set: '+startLabel());
+    if(trip.stops.length) planTrip({forceAnimate:true}); else renderTripPanel();
+  }
+
+  /* ============== NAVIGATION ============== */
+  const legOfSeg = i=>{ const k=legEndSeg.findIndex(e=>e>=i); return k<0 ? legEndSeg.length-1 : k; };
+  function buildNavArrays(){
     cumLen=[0]; cumTime=[0]; segLens=[]; segTimes=[];
     currentPath.forEach(seg=>{
       const e=edges[seg.edgeIdx], km=edgeKm(e), sec=edgeSeconds(e);
@@ -1299,25 +997,44 @@ export function initDriftline() {
       cumLen.push(cumLen[cumLen.length-1]+km);
       cumTime.push(cumTime[cumTime.length-1]+sec);
     });
-    const totalLen = cumLen[cumLen.length-1], totalSec = cumTime[cumTime.length-1];
+  }
+  function startNavigation(){
+    if(!currentPath || animRunning) return;
+    setPreviewVisible(false);
+    $('turnCard').classList.add('show');
+    $('driveHud').classList.add('show');
+    $('speedHud').classList.add('show');
+    $('searchRow').style.visibility='hidden';
+    algPanel.classList.remove('show'); algBtn.classList.remove('active');
+    closeFan(); closeAdminPanel(); closeMenu(); closeCompare(); suggestBox.classList.remove('show');
+    searchAnim=null; searchAnimsDone=[]; if(searchTimer){ clearInterval(searchTimer); searchTimer=null; }
+
+    navStops=trip.stops.slice(); navLegs=legs.slice(); navStopK=0; navPause=0; curSpeed=0;
+    buildNavArrays();
+    const totalSec = cumTime[cumTime.length-1];
     playbackSeconds = Math.max(9, Math.min(42, totalSec/280));
 
     navActive=true; navFrac=0; navSegIdx=0; followMode=true;
-    document.getElementById('recenterBtn').classList.remove('show');
-    document.documentElement.style.setProperty('--fab-bottom', '104px');
-    updateTurnBanner();
+    $('recenterBtn').classList.remove('show');
+    root.style.setProperty('--recenter-bottom', '130px'); // the recentre button sits above the speed HUD
+    renderTripPanel();
+    updateTurnBanner(); updateHudStop(); updateSpeedHud(true);
     updateRouteReportsPanel();
-    showToast("Drive started to "+currentDestination.name);
+    showToast(navStops.length>1 ? 'Road trip started · '+navStops.length+' stops' : 'Drive started to '+navStops[0].poi.name);
   }
   function endNavigation(){
-    navActive=false; currentDestination=null; currentPath=null;
-    document.getElementById('turnCard').classList.remove('show');
-    document.getElementById('driveHud').classList.remove('show');
-    document.getElementById('routeReportsPanel').classList.remove('show');
-    document.getElementById('searchRow').style.visibility='visible';
-    document.documentElement.style.setProperty('--fab-bottom', '16px');
+    navActive=false; currentPath=null; legs=[]; legEndSeg=[]; currentDestination=null; trip.stops=[]; navStops=[]; navLegs=[];
+    $('turnCard').classList.remove('show');
+    $('driveHud').classList.remove('show');
+    $('speedHud').classList.remove('show');
+    $('routeReportsPanel').classList.remove('show');
+    dismissReroute(false);
+    $('searchRow').style.visibility='visible';
+    root.style.setProperty('--recenter-bottom', '16px');
     followMode=false;
+    renderTripPanel();
   }
+  $('exitBtn').onclick=endNavigation;
 
   function segForward(seg){ return seg.from===edges[seg.edgeIdx].a; }
   const turnIcons = {
@@ -1328,7 +1045,8 @@ export function initDriftline() {
   };
   function updateTurnBanner(){
     if(!navActive || !currentPath) return;
-    const seg=currentPath[navSegIdx], e=edges[seg.edgeIdx], isLast=navSegIdx===currentPath.length-1;
+    const seg=currentPath[navSegIdx], e=edges[seg.edgeIdx], k=legOfSeg(navSegIdx);
+    const isLegEnd=navSegIdx===legEndSeg[k], isLast=k===legEndSeg.length-1 && isLegEnd;
     let kind='straight', mainTxt='Continue on '+e.name;
     if(navSegIdx>0){
       const prevSeg=currentPath[navSegIdx-1], prevE=edges[prevSeg.edgeIdx];
@@ -1341,43 +1059,112 @@ export function initDriftline() {
         else{ kind='left'; mainTxt='Turn left onto '+e.name; }
       }
     } else { mainTxt='Head out on '+e.name; }
-    document.getElementById('turnSub').textContent = isLast ? 'Arriving at '+currentDestination.name
+    const stopName = navStops[k] ? navStops[k].poi.name : '';
+    $('turnSub').textContent = isLast ? 'Arriving at '+stopName
+      : isLegEnd ? 'Stop '+(k+1)+': '+stopName
       : 'then '+edges[currentPath[navSegIdx+1].edgeIdx].name;
-    document.getElementById('turnIcon').innerHTML = turnIcons[kind];
-    document.getElementById('turnMain').textContent = mainTxt;
+    $('turnIcon').innerHTML = turnIcons[kind];
+    $('turnMain').textContent = mainTxt;
     updateRouteReportsPanel();
   }
+  function updateHudStop(){
+    const el=$('hudStop');
+    if(navStops.length>1){ const k=Math.min(navStopK, navStops.length-1); el.textContent=`Stop ${k+1} of ${navStops.length} · ${navStops[k].poi.name}`; el.classList.add('show'); }
+    else el.classList.remove('show');
+  }
+  let shownLimit=null, shownSpeed=null;
+  function updateSpeedHud(force){
+    if(force){ shownLimit=null; shownSpeed=null; }
+    const lim=Math.round(curLimit), spd=Math.round(curSpeed);
+    if(lim!==shownLimit){ $('limitNum').textContent=lim; shownLimit=lim; }
+    if(spd!==shownSpeed){ $('hudSpeed').textContent=spd; shownSpeed=spd; }
+  }
+  function arriveAtStop(k){
+    $('turnIcon').innerHTML=turnIcons.arrive;
+    $('turnMain').textContent='Stop '+(k+1)+' reached';
+    $('turnSub').textContent=navStops[k].poi.name+' · continuing to '+navStops[k+1].poi.name;
+    showToast('Arrived at stop '+(k+1)+': '+navStops[k].poi.name);
+  }
   function arrive(){
-    document.getElementById('turnIcon').innerHTML=turnIcons.arrive;
-    document.getElementById('turnMain').textContent='You have arrived';
-    document.getElementById('turnSub').textContent=currentDestination.name;
-    showToast('Arrived at '+currentDestination.name);
-    const dest=currentDestination;
+    $('turnIcon').innerHTML=turnIcons.arrive;
+    $('turnMain').textContent='You have arrived';
+    $('turnSub').textContent=navStops[navStops.length-1].poi.name;
+    showToast('Arrived at '+navStops[navStops.length-1].poi.name);
+    curSpeed=0; updateSpeedHud();
     setTimeout(endNavigation, 2200);
     navActive=false;
   }
 
+  /* ---- reroute offers: a faster way round the reports ahead ---- */
+  const rerouteState={ pending:null, dismissedAt:-1 };
+  function dismissReroute(remember){
+    if(remember) rerouteState.dismissedAt=graph.delayVersion();
+    rerouteState.pending=null; $('rerouteCard').classList.remove('show');
+  }
+  function checkReroute(){
+    if(!settings.offerReroute || !navActive || !currentPath || rerouteState.pending) return;
+    if(rerouteState.dismissedAt===graph.delayVersion()) return;
+    const seg=currentPath[navSegIdx], k=legOfSeg(navSegIdx), destId=navLegs[k].toId;
+    if(seg.to===destId) return;
+    let cur=0; for(let i=navSegIdx+1;i<=legEndSeg[k];i++) cur+=edgeSeconds(edges[currentPath[i].edgeIdx]);
+    const best=runDijkstra(seg.to, destId); if(!best) return;
+    const same = best.path.length===legEndSeg[k]-navSegIdx && best.path.every((s,j)=>s.edgeIdx===currentPath[navSegIdx+1+j].edgeIdx);
+    const save=cur-best.totalSec;
+    if(same || save<120) return;
+    const types=[...new Set(hazardsOnRoute(currentPath, navSegIdx).map(h=>TYPE_LABELS[h.type].toLowerCase()))];
+    rerouteState.pending={ k, path:best.path, save };
+    $('rerouteText').textContent = `${types.length ? types.join(' and ') : 'Traffic'} reported ahead. A faster route saves about ${Math.round(save/60)} min.`;
+    $('rerouteCard').classList.add('show');
+  }
+  function applyReroute(){
+    const p=rerouteState.pending; if(!p || !navActive) return;
+    const idx=navSegIdx;
+    const localT = segLens[idx]>0 ? Math.min(1,(navFrac*cumLen[cumLen.length-1]-cumLen[idx])/segLens[idx]) : 1;
+    const doneKm = cumLen[idx]+localT*segLens[idx];
+    const oldEnd=legEndSeg[p.k];
+    const head=currentPath.slice(0,idx+1), tail=currentPath.slice(oldEnd+1);
+    currentPath=[...head, ...p.path, ...tail];
+    const newEnd=idx+p.path.length, delta=newEnd-oldEnd;
+    legEndSeg=legEndSeg.map((e,j)=> j<p.k ? e : j===p.k ? newEnd : e+delta);
+    buildNavArrays();
+    navFrac=doneKm/cumLen[cumLen.length-1];
+    dismissReroute(false);
+    updateTurnBanner();
+    showToast('Rerouted: about '+Math.round(p.save/60)+' min faster');
+  }
+  $('rerouteYes').onclick=applyReroute;
+  $('rerouteNo').onclick=()=> dismissReroute(true);
+
   /* ============== MAIN LOOP ============== */
-  const LABEL_MIN_SCALE = {1:0, 2:0.8, 3:1.2, 4:2.2, 5:3.6, 6:5.5, 7:12, 8:24}; // zoom at which each rank gets a name label // zoom level at which each town rank gets a name label
   let lastT=null, pulseT=0;
   function frame(t){
     if(lastT===null) lastT=t;
     const dt=Math.min(0.05,(t-lastT)/1000); lastT=t; pulseT+=dt;
 
     if(navActive && currentPath){
-      navFrac += dt/playbackSeconds;
+      if(navPause>0){ navPause-=dt; }                     // brief stop at each waypoint
+      else navFrac += dt/playbackSeconds;
+      const totalLen=cumLen[cumLen.length-1];
+      let target=Math.min(1,navFrac)*totalLen;
+      // reached the end of a leg that is not the last: stop there for a moment
+      if(navStopK<legEndSeg.length-1){
+        const stopAt=cumLen[legEndSeg[navStopK]+1];
+        if(target>=stopAt){
+          navFrac=stopAt/totalLen; target=stopAt; navPause=1.6;
+          arriveAtStop(navStopK); navStopK++; updateHudStop();
+        }
+      }
       if(navFrac>=1){
         const last=currentPath[currentPath.length-1];
         car.x=nodes[last.to].x; car.y=nodes[last.to].y;
         arrive();
       } else {
-        const totalLen=cumLen[cumLen.length-1], target=navFrac*totalLen;
         let idx=0; while(idx<segLens.length-1 && cumLen[idx+1]<target) idx++;
-        if(idx!==navSegIdx){ navSegIdx=idx; updateTurnBanner(); }
+        if(idx!==navSegIdx){ navSegIdx=idx; if(navPause<=0) updateTurnBanner(); }
         const segStart=cumLen[idx], segLen=segLens[idx];
         const localT = segLen>0 ? Math.min(1,(target-segStart)/segLen) : 1;
-        const seg=currentPath[idx], segEdge=edges[seg.edgeIdx];
-        const pos=pointAlong(segEdge, segForward(seg), localT*segEdge.len);
+        const seg=currentPath[idx], segEdge=edges[seg.edgeIdx], fwd=segForward(seg);
+        const pos=pointAlong(segEdge, fwd, localT*segEdge.len);
         car.x=pos.x; car.y=pos.y; car.heading=pos.heading;
         if(followMode) centerOn(car.x,car.y);
 
@@ -1385,11 +1172,15 @@ export function initDriftline() {
         const totalSec = cumTime[cumTime.length-1];
         const remainSec = Math.max(0,totalSec-elapsedTime);
         const remainKm = Math.max(0,totalLen-target);
-        document.getElementById('hudSpeed').textContent = Math.round(edgeSpeed(edges[seg.edgeIdx]));
+        // the car eases to the limit at its position (which drops in built-up areas)
+        curLimit = graph.limitAt(segEdge, fwd, localT*segEdge.len);
+        const goal = navPause>0 ? 0 : curLimit;
+        curSpeed += Math.max(-90*dt, Math.min(40*dt, goal-curSpeed));
+        updateSpeedHud();
         const rmin=Math.round(remainSec/60);
-        document.getElementById('hudTime').textContent = rmin>=60 ? Math.floor(rmin/60)+'h '+(rmin%60)+'m' : rmin+' min';
-        document.getElementById('hudDist').textContent = remainKm.toFixed(0);
-        document.getElementById('hudEta').textContent = new Date(Date.now()+remainSec*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+        $('hudTime').textContent = rmin>=60 ? Math.floor(rmin/60)+'h '+(rmin%60)+'m' : rmin+' min';
+        $('hudDist').textContent = remainKm.toFixed(0);
+        $('hudEta').textContent = new Date(Date.now()+remainSec*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
       }
     }
     render();
@@ -1407,7 +1198,7 @@ export function initDriftline() {
     const vx0=-offsetX/scale-30/scale, vx1=(W-offsetX)/scale+30/scale, vy0=-offsetY/scale-30/scale, vy1=(H-offsetY)/scale+30/scale;
     const inView = p=> p.x>=vx0 && p.x<=vx1 && p.y>=vy0 && p.y<=vy1;
 
-    // state landmass (mainland + the larger islands)
+    // state landmass (mainland + islands, from the real coastline)
     ctx.lineJoin='round';
     ctx.fillStyle=styles.getPropertyValue('--land').trim();
     ctx.lineWidth=2/scale; ctx.strokeStyle=styles.getPropertyValue('--border-line').trim();
@@ -1420,7 +1211,7 @@ export function initDriftline() {
     // roads, drawn weakest to strongest
     ['access','outback','rural','highway'].forEach(kind=>{
       edges.forEach(e=>{
-        if(e.type!==kind) return;
+        if(e.removed || e.type!==kind) return;
         const bb=e.bbox; if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
         ctx.beginPath(); e.pts.forEach((p,i)=> i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.lineCap='round'; ctx.lineJoin='round';
         if(kind==='access'){
@@ -1438,29 +1229,37 @@ export function initDriftline() {
       });
     });
 
-    // search visualization: neon lines growing out along the roads being searched
-    if(searchAnim){
-      const now=performance.now(), wv=searchAnim.wave;
-      const simT = wv ? Math.min(wv.T, (now-wv.startMs)/wv.durMs*wv.T) : 0;
-      const grown=[];
-      searchAnim.segs.forEach(seg=>{
-        const e=edges[seg.edgeIdx], bb=e.bbox;
-        if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
+    // search visualization: neon lines growing out along the roads being searched (earlier legs stay, dimmed)
+    const now=performance.now();
+    const collect=(anim, list)=>{
+      const wv=anim.wave;
+      const simT = wv ? (wv.static ? wv.T : Math.min(wv.T,(now-wv.startMs)/wv.durMs*wv.T)) : 0;
+      anim.segs.forEach(seg=>{
+        const e=edges[seg.edgeIdx]; if(e.removed) return;
+        const bb=e.bbox; if(bb.x1<vx0 || bb.x0>vx1 || bb.y1<vy0 || bb.y0>vy1) return;
         const d = wv ? Math.max(0, Math.min(simT, seg.s1)-seg.s0)
-                     : Math.max(0, Math.min(1, (now-seg.t0)/seg.dur))*e.len;
-        if(d>0) grown.push([e, seg.fwd, d]);
+                : seg.t0===undefined ? e.len
+                : Math.max(0, Math.min(1, (now-seg.t0)/seg.dur))*e.len;
+        if(d>0) list.push([e, seg.fwd, d]);
       });
+    };
+    const dimmed=[], live=[];
+    searchAnimsDone.forEach(a=>collect(a,dimmed));
+    if(searchAnim) collect(searchAnim, live);
+    const neon=(list, mult)=>{
+      if(!list.length) return;
       const pass=(w, style, alpha)=>{
-        ctx.beginPath(); grown.forEach(([e,fwd,d])=>tracePartial(e,fwd,d));
+        ctx.beginPath(); list.forEach(([e,fwd,d])=>tracePartial(e,fwd,d));
         ctx.lineWidth=w/zs; ctx.strokeStyle=style; ctx.lineCap='round'; ctx.lineJoin='round';
-        ctx.globalAlpha = alpha*(searchAnim.done ? 0.45 : 1); ctx.stroke();
+        ctx.globalAlpha=alpha*mult; ctx.stroke();
       };
       pass(11, NEON, 0.16); pass(5.5, NEON, 0.5); pass(2, '#D9FFD0', 1); // glow, body, hot core
       ctx.globalAlpha=1;
-    }
+    };
+    neon(dimmed, 0.45); neon(live, 1);
 
-    // final route
-    if(currentPath && (!searchAnim || searchAnim.done)){
+    // final route: purple, so it stands out against the neon-green search lines
+    if(currentPath && !animRunning){
       ctx.beginPath();
       let started=false;
       currentPath.forEach(seg=>{
@@ -1468,42 +1267,46 @@ export function initDriftline() {
         for(let k=0;k<pts.length;k++){ const p=pts[fwd?k:pts.length-1-k]; if(!started){ ctx.moveTo(p.x,p.y); started=true; } else ctx.lineTo(p.x,p.y); }
       });
       ctx.lineJoin='round'; ctx.lineCap='round';
-      ctx.lineWidth=7/zs; ctx.strokeStyle=styles.getPropertyValue('--route-glow').trim(); ctx.stroke();
-      ctx.lineWidth=3.4/zs; ctx.strokeStyle=styles.getPropertyValue('--route').trim();
+      ctx.lineWidth=9/zs; ctx.strokeStyle=styles.getPropertyValue('--path-glow').trim(); ctx.stroke();
+      ctx.lineWidth=4.4/zs; ctx.strokeStyle=styles.getPropertyValue('--path').trim();
       if(!navActive) ctx.setLineDash([2/zs,7/zs]);
       ctx.stroke(); ctx.setLineDash([]);
     }
 
-    // towns
+    // towns + extra places
     const DOT_R = {1:5, 2:4, 3:3, 4:2.5};
     const textCol = styles.getPropertyValue('--text').trim(), routeCol = styles.getPropertyValue('--route').trim();
-    const isDestNode = n=> currentDestination && currentDestination.id===n.id;
-    ctx.beginPath();
-    places.forEach(p=>{
-      if(!placeVisible(p)) return;
-      const q = p.link.kind==='node' ? nodes[p.link.idx] : places[p.link.idx];
-      // skip links whose bounding box is entirely off screen
-      if(Math.max(p.x,q.x)<vx0 || Math.min(p.x,q.x)>vx1 || Math.max(p.y,q.y)<vy0 || Math.min(p.y,q.y)>vy1) return;
-      ctx.moveTo(q.x,q.y); ctx.lineTo(p.x,p.y);
-    });
-    ctx.lineWidth=1.3/zs; ctx.setLineDash([3/zs,4/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); ctx.stroke(); ctx.setLineDash([]);
-    places.forEach(p=>{
-      if(!placeVisible(p) || !inView(p) || (p.nodeId!==null && isDestNode(nodes[p.nodeId]))) return;
-      ctx.beginPath(); ctx.arc(p.x,p.y, 2/zs, 0, Math.PI*2);
-      ctx.fillStyle=textCol; ctx.globalAlpha=0.4; ctx.fill(); ctx.globalAlpha=1;
-    });
+    const stopIds = new Set((navActive ? navStops : trip.stops).map(s=>s.node.id));
+    const numbered = stopIds.size>1;
+    if(settings.showPlaces){
+      // local roads linking each visible place in, drawn along their real shapes
+      ctx.beginPath();
+      places.forEach(p=>{
+        if(!placeVisible(p)) return;
+        const pts=p.link.pts, q=pts[0];
+        if(Math.max(p.x,q.x)<vx0 || Math.min(p.x,q.x)>vx1 || Math.max(p.y,q.y)<vy0 || Math.min(p.y,q.y)>vy1) return;
+        for(let k=0;k<pts.length;k++) k===0 ? ctx.moveTo(pts[k].x,pts[k].y) : ctx.lineTo(pts[k].x,pts[k].y);
+      });
+      ctx.lineWidth=1.3/zs; ctx.setLineDash([3/zs,4/zs]); ctx.strokeStyle=styles.getPropertyValue('--road-local-line').trim(); ctx.stroke(); ctx.setLineDash([]);
+      places.forEach(p=>{
+        if(!placeVisible(p) || !inView(p) || (p.nodeId!==null && stopIds.has(p.nodeId))) return;
+        ctx.beginPath(); ctx.arc(p.x,p.y, 2/zs, 0, Math.PI*2);
+        ctx.fillStyle=textCol; ctx.globalAlpha=0.4; ctx.fill(); ctx.globalAlpha=1;
+      });
+    }
     nodes.forEach(n=>{
-      const isDest = isDestNode(n);
-      if(n.virtual && !isDest) return;
-      ctx.beginPath(); ctx.arc(n.x,n.y, (isDest?7:DOT_R[n.rank])/zs, 0, Math.PI*2);
-      ctx.fillStyle = isDest ? routeCol : textCol;
-      ctx.globalAlpha = isDest?1:0.55; ctx.fill(); ctx.globalAlpha=1;
+      const isStop = stopIds.has(n.id);
+      if(n.virtual && !isStop) return;
+      if(isStop && numbered) return;               // numbered markers are drawn on top, in screen space
+      ctx.beginPath(); ctx.arc(n.x,n.y, (isStop?7:DOT_R[n.rank])/zs, 0, Math.PI*2);
+      ctx.fillStyle = isStop ? routeCol : textCol;
+      ctx.globalAlpha = isStop?1:0.55; ctx.fill(); ctx.globalAlpha=1;
     });
     // labels: bigger towns win, smaller ones appear as you zoom in, and any label that would
     // overlap one already placed is skipped so a map this dense stays readable
     const onPath = new Set();
     if(currentPath) currentPath.forEach(seg=>{ onPath.add(seg.from); onPath.add(seg.to); });
-    const priority = n=> (n.id!==undefined && currentDestination && currentDestination.id===n.id) ? 0 : (n.id!==undefined && onPath.has(n.id)) ? 1 : 1+n.rank;
+    const priority = n=> (n.id!==undefined && stopIds.has(n.id)) ? 0 : (n.id!==undefined && onPath.has(n.id)) ? 1 : 1+n.rank;
     // Labels are drawn in screen pixels, not map units: a font sized as 12/scale rounds to 0px at
     // extreme zoom, which is what made every name vanish at max zoom.
     const LABEL_PX=12;
@@ -1511,23 +1314,36 @@ export function initDriftline() {
     ctx.font='600 '+LABEL_PX+'px "Space Grotesk", sans-serif';
     ctx.fillStyle=textCol; ctx.textBaseline='bottom';
     const pad=3, placed=[];
-    const candidates = nodes.filter(n=> (!n.virtual || isDestNode(n)) && (priority(n)<=1 || scale>=LABEL_MIN_SCALE[n.rank]))
-      .concat(places.filter(p=> scale>=LABEL_MIN_SCALE[p.rank] && inView(p) && !(p.nodeId!==null && isDestNode(nodes[p.nodeId]))));
+    const candidates = nodes.filter(n=> (!n.virtual || stopIds.has(n.id)) && (priority(n)<=1 || scale>=LABEL_MIN_SCALE[n.rank]))
+      .concat(settings.showPlaces ? places.filter(p=> scale>=LABEL_MIN_SCALE[p.rank] && inView(p) && !(p.nodeId!==null && stopIds.has(p.nodeId))) : []);
     candidates
       .sort((a,b)=>priority(a)-priority(b))
       .forEach(n=>{
         const sx=n.x*scale+offsetX, sy=n.y*scale+offsetY;
         if(sx<-300 || sx>W+300 || sy<-100 || sy>H+100) return;
-        const w=ctx.measureText(n.name).width, x0=sx+8, y1=sy-4;
+        const w=ctx.measureText(n.name).width, x0=sx+(numbered && stopIds.has(n.id) ? 14 : 8), y1=sy-4;
         const r={x0:x0-pad, x1:x0+w+pad, y0:y1-LABEL_PX-pad, y1:y1+pad};
         if(placed.some(p=> r.x0<p.x1 && r.x1>p.x0 && r.y0<p.y1 && r.y1>p.y0)) return;
         placed.push(r);
         ctx.fillText(n.name, x0, y1);
       });
+    // numbered stop markers for a road trip
+    if(numbered){
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      (navActive ? navStops : trip.stops).forEach((s,i)=>{
+        const sx=s.node.x*scale+offsetX, sy=s.node.y*scale+offsetY;
+        if(sx<-20 || sx>W+20 || sy<-20 || sy>H+20) return;
+        ctx.beginPath(); ctx.arc(sx,sy,9,0,Math.PI*2); ctx.fillStyle=routeCol; ctx.fill();
+        ctx.lineWidth=2; ctx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); ctx.stroke();
+        ctx.fillStyle='#04211d'; ctx.font='700 11px "Space Grotesk", sans-serif'; ctx.fillText(String(i+1), sx, sy+0.5);
+      });
+    }
     ctx.restore();
 
     // hazards
+    const beforeCount=hazards.length;
     hazards = hazards.filter(h=>Date.now()-h.t<20*60*1000);
+    if(hazards.length!==beforeCount){ saveHazards(); hazardsChanged(); }
     const hazColors={police:'--blue', hazard:'--amber', crash:'--red'};
     const hazR = Math.min(6, 5/scale); // ~5px on screen once zoomed in, same approach as town labels
     hazards.forEach(h=>{
@@ -1538,19 +1354,30 @@ export function initDriftline() {
       ctx.lineWidth=1.4/scale; ctx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); ctx.stroke();
     });
 
-    // car — always an arrow, pointing in the current heading (idle heading defaults to north)
+    // the user (car) — always a red arrow, pointing in the current heading (idle heading defaults to north)
     ctx.save(); ctx.translate(car.x,car.y); ctx.rotate(car.heading); ctx.scale(1/zs,1/zs);
     if(!navActive){
       const pulse=reduceMotion?0:Math.sin(pulseT*2.4)*0.3+0.7;
-      ctx.beginPath(); ctx.arc(0,0,12*pulse,0,Math.PI*2); ctx.fillStyle=styles.getPropertyValue('--blue').trim(); ctx.globalAlpha=0.22; ctx.fill(); ctx.globalAlpha=1;
+      ctx.beginPath(); ctx.arc(0,0,12*pulse,0,Math.PI*2); ctx.fillStyle=styles.getPropertyValue('--user').trim(); ctx.globalAlpha=0.22; ctx.fill(); ctx.globalAlpha=1;
     }
     ctx.beginPath(); ctx.moveTo(11,0); ctx.lineTo(-7,6); ctx.lineTo(-3,0); ctx.lineTo(-7,-6); ctx.closePath();
-    ctx.fillStyle = navActive ? styles.getPropertyValue('--route').trim() : styles.getPropertyValue('--blue').trim();
+    ctx.fillStyle = styles.getPropertyValue('--user').trim();
     ctx.fill();
     ctx.lineWidth=1.6; ctx.strokeStyle=styles.getPropertyValue('--map-bg').trim(); ctx.stroke();
     ctx.restore();
 
     ctx.restore();
+  }
+
+  // Test hook: only exists when a test sets window.__DRIFTLINE_DEBUG__ before starting the app.
+  if(window.__DRIFTLINE_DEBUG__){
+    window.__driftline = {
+      graph, ALGS, trip, hazards:()=>hazards, saved:()=>saved, settings, car:()=>car,
+      state:()=>({ navActive, legs:legs.length, animRunning, pathLen:currentPath?currentPath.length:0, legEndSeg:legEndSeg.slice(),
+        searchMode, navStopK, navSegIdx, navFrac, curSpeed, curLimit, rerouteOffered:!!rerouteState.pending, scale }),
+      chooseDestination, handlePick, planTrip, moveStop, removeStop, startNavigation, setStartAtWorld, setCarAtNode,
+      addHazardAt, applyReroute, openCompare, setSetting, toggleFav, setSearchMode, cancelTrip, endNavigation,
+    };
   }
 
   rafId = requestAnimationFrame(frame);
