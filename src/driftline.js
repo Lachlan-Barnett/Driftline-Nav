@@ -44,6 +44,7 @@ export function initDriftline() {
     { key:'offerReroute',  label:'Offer reroutes while driving',       def:true },
     { key:'showPlaces',    label:'Show suburbs, villages & local roads', def:true },
     { key:'animate',       label:'Animate the search',                 def:true },
+    { key:'bidirectional', label:'Bidirectional search',               def:false },
   ];
   const settings = {};
   SETTING_DEFS.forEach(d=>{
@@ -471,7 +472,7 @@ export function initDriftline() {
 
   /* ============== ALGORITHM PANEL ============== */
   let currentAlg = (prefs.alg && ALGS[prefs.alg]) ? prefs.alg : 'dijkstra';
-  const algBtn=$('algBtn'), algPanel=$('algPanel');
+  const algBtn=$('algBtn'), algPanel=$('algPanel'), bidirCheck=$('bidirCheck');
   function paintPills(){
     document.querySelectorAll('.algPill').forEach(btn=>{
       const a=btn.dataset.alg, on=a===currentAlg;
@@ -480,6 +481,11 @@ export function initDriftline() {
       btn.style.color = on ? '#04211d' : '';
     });
     $('algDesc').textContent = ALGS[currentAlg].desc;
+    // only some algorithms can search from both ends
+    const canBidir=!!ALGS[currentAlg].bidir;
+    bidirCheck.disabled=!canBidir;
+    $('bidirRow').classList.toggle('off', !canBidir);
+    $('bidirNote').textContent = canBidir ? '' : 'BFS, Dijkstra and A* only';
   }
   paintPills();
   algBtn.onclick = ()=>{
@@ -495,6 +501,7 @@ export function initDriftline() {
   document.querySelectorAll('.algPill').forEach(btn=>{ btn.onclick=()=>setAlgorithm(btn.dataset.alg); });
   const animSwitch=$('animSwitch');
   animSwitch.onclick=()=> setSetting('animate', !settings.animate);
+  bidirCheck.onchange=()=> setSetting('bidirectional', !!bidirCheck.checked);
   $('algCompareBtn').onclick=()=> openCompare();
 
   /* ============== HAMBURGER MENU + SETTINGS ============== */
@@ -513,6 +520,7 @@ export function initDriftline() {
     $('settingsList').innerHTML = SETTING_DEFS.map(d=>
       `<div class="settingRow"><span>${d.label}</span><div class="switch${settings[d.key]?' on':''}" data-setting="${d.key}"></div></div>`).join('');
     animSwitch.classList.toggle('on', settings.animate);
+    bidirCheck.checked = settings.bidirectional;
     $('speedHud').classList.toggle('noSign', !settings.speedSigns);
   }
   function setSetting(key, value){
@@ -521,6 +529,10 @@ export function initDriftline() {
     if(key==='builtUp' || key==='avoidReports'){
       if(navActive) return;                      // never change the trip mid-drive
       if(trip.stops.length) planTrip();
+    }
+    if(key==='bidirectional'){
+      if(trip.stops.length && !navActive) planTrip({forceAnimate:true});
+      return;
     }
     if(key==='speedSigns' && navActive) updateSpeedHud(true);
   }
@@ -746,7 +758,7 @@ export function initDriftline() {
   }
 
   function computeLeg(fromId, toId){
-    const key=[fromId,toId,currentAlg,graph.graphVersion(),graph.delayVersion(),settings.builtUp,settings.avoidReports].join('|');
+    const key=[fromId,toId,currentAlg,graph.graphVersion(),graph.delayVersion(),settings.builtUp,settings.avoidReports,settings.bidirectional&&!!ALGS[currentAlg].bidir].join('|');
     const hit=legCache.get(key);
     if(hit) return Object.assign({}, hit, {cached:true});
     const result=ALGS[currentAlg].fn(fromId,toId);

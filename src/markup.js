@@ -38,6 +38,7 @@ export const markup = `
     </div>
     <div id="algDesc">—</div>
     <div id="animateRow"><span>Animate the search</span><div class="switch on" id="animSwitch"></div></div>
+    <label id="bidirRow"><input type="checkbox" id="bidirCheck"><span>Bidirectional search</span><small id="bidirNote"></small></label>
     <button class="btnGhost" id="algCompareBtn">Compare all algorithms</button>
     <div id="statsRow" style="display:none;"></div>
   </div>

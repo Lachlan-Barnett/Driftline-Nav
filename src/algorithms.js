@@ -1,9 +1,9 @@
-// The seven routing algorithms. Each takes (startNodeId, endNodeId) and returns
+// The seven routing algorithms (BFS, Dijkstra and A* can also run bidirectionally, per settings.bidirectional). Each takes (startNodeId, endNodeId) and returns
 //   { path, trace, totalSec, totalLenKm, nodesExplored }   (or null if there is no route)
 // where `path` is a list of { edgeIdx, from, to } and `trace` is the sequence of expansions the
 // search made (used to animate it). Wave also returns `wave` = { segs, T } for its flood animation.
 export function createAlgorithms(graph) {
-  const { nodes, edges, adj, edgeSeconds, edgeKm, heuristicSeconds } = graph;
+  const { nodes, edges, adj, edgeSeconds, edgeKm, heuristicSeconds, settings } = graph;
 
   // One trace step: town u was expanded, and (unless it is the start) the road it was reached by.
   function expandStep(u, parent) {
@@ -18,6 +18,81 @@ export function createAlgorithms(graph) {
     path.forEach(seg => { const e = edges[seg.edgeIdx]; totalSec += edgeSeconds(e, seg.from === e.a); totalLen += edgeKm(e); });
     const explored = new Set(); trace.forEach(t => { if (t.expand !== undefined) explored.add(t.expand); });
     return { path, trace, totalSec, totalLenKm: totalLen, nodesExplored: explored.size };
+  }
+
+  // Bidirectional searches grow one tree from the start and another back from the destination
+  // until they touch. `bridge` is the road that joined them: travelled a -> b, where a is in the
+  // start's tree and b is in the destination's tree. parentF / parentB are the two trees (parentB
+  // points toward the destination), and the trace holds the expansions from both, in order.
+  function buildBidirResult(startId, endId, parentF, parentB, bridge, trace) {
+    if (!bridge) return null;
+    const path = []; let cur = bridge.a;
+    while (cur !== startId) { const pe = parentF.get(cur); path.unshift({ edgeIdx: pe.edgeIdx, from: pe.from, to: cur }); cur = pe.from; }
+    path.push({ edgeIdx: bridge.edgeIdx, from: bridge.a, to: bridge.b });
+    cur = bridge.b;
+    while (cur !== endId) { const pe = parentB.get(cur); path.push({ edgeIdx: pe.edgeIdx, from: cur, to: pe.from }); cur = pe.from; }
+    let totalSec = 0, totalLen = 0;
+    path.forEach(seg => { const e = edges[seg.edgeIdx]; totalSec += edgeSeconds(e, seg.from === e.a); totalLen += edgeKm(e); });
+    const explored = new Set(); trace.forEach(t => { if (t.expand !== undefined) explored.add(t.expand); });
+    return { path, trace, totalSec, totalLenKm: totalLen, nodesExplored: explored.size };
+  }
+  const sameTown = (startId, endId) => buildResult(startId, endId, new Map(), [{ expand: startId }]);
+
+  // Breadth-first from both ends, always growing the smaller side one whole layer at a time.
+  function runBiBFS(startId, endId) {
+    if (startId === endId) return sameTown(startId, endId);
+    const parentF = new Map(), parentB = new Map(), trace = [];
+    const depthF = new Map([[startId, 0]]), depthB = new Map([[endId, 0]]);
+    let layerF = [startId], layerB = [endId], bridge = null, bestHops = Infinity;
+    while (layerF.length && layerB.length && !bridge) {
+      const fwd = layerF.length <= layerB.length;
+      const layer = fwd ? layerF : layerB, depth = fwd ? depthF : depthB, other = fwd ? depthB : depthF, parent = fwd ? parentF : parentB;
+      const next = [];
+      for (const u of layer) {
+        trace.push(expandStep(u, parent));
+        for (const link of adj.get(u)) {
+          if (!depth.has(link.to)) { depth.set(link.to, depth.get(u) + 1); parent.set(link.to, { from: u, edgeIdx: link.edgeIdx }); next.push(link.to); }
+          if (other.has(link.to)) {
+            const hops = depth.get(u) + 1 + other.get(link.to);
+            if (hops < bestHops) { bestHops = hops; bridge = fwd ? { a: u, b: link.to, edgeIdx: link.edgeIdx } : { a: link.to, b: u, edgeIdx: link.edgeIdx }; }
+          }
+        }
+      }
+      if (fwd) layerF = next; else layerB = next;
+    }
+    return buildBidirResult(startId, endId, parentF, parentB, bridge, trace);
+  }
+  // Dijkstra (or A* when `guided`) from both ends, always growing the side with the cheaper next
+  // town. The A* version steers both trees with a shared, consistent estimate: half the difference
+  // between the straight-line time to the destination and to the start (Goldberg & Harrelson).
+  function runBiBest(startId, endId, guided) {
+    if (startId === endId) return sameTown(startId, endId);
+    const gF = new Map(), gB = new Map(), parentF = new Map(), parentB = new Map(), doneF = new Set(), doneB = new Set(), trace = [];
+    nodes.forEach(n => { gF.set(n.id, Infinity); gB.set(n.id, Infinity); });
+    gF.set(startId, 0); gB.set(endId, 0);
+    const pot = id => guided ? (heuristicSeconds(id, endId) - heuristicSeconds(id, startId)) / 2 : 0;
+    // cheapest unfinished town on one side: forward keys are g + pot, backward keys g - pot
+    const pick = (g, done, sign) => {
+      let u = -1, best = Infinity;
+      for (const n of nodes) { if (done.has(n.id) || g.get(n.id) === Infinity) continue; const k = g.get(n.id) + sign * pot(n.id); if (k < best) { best = k; u = n.id; } }
+      return { u, k: best };
+    };
+    let topF = pick(gF, doneF, 1), topB = pick(gB, doneB, -1), mu = Infinity, bridge = null;
+    while (topF.u !== -1 && topB.u !== -1 && topF.k + topB.k < mu) {
+      const fwd = topF.k <= topB.k;
+      const g = fwd ? gF : gB, gOther = fwd ? gB : gF, done = fwd ? doneF : doneB, parent = fwd ? parentF : parentB, u = fwd ? topF.u : topB.u;
+      done.add(u); trace.push(expandStep(u, parent));
+      for (const link of adj.get(u)) {
+        const e = edges[link.edgeIdx];
+        // forward drives u -> to; backward is searching for the road that drives to -> u
+        const nd = g.get(u) + (fwd ? edgeSeconds(e, u === e.a) : edgeSeconds(e, link.to === e.a));
+        if (nd < g.get(link.to)) { g.set(link.to, nd); parent.set(link.to, { from: u, edgeIdx: link.edgeIdx }); }
+        const total = g.get(u) + (fwd ? edgeSeconds(e, u === e.a) : edgeSeconds(e, link.to === e.a)) + gOther.get(link.to);
+        if (total < mu) { mu = total; bridge = fwd ? { a: u, b: link.to, edgeIdx: link.edgeIdx } : { a: link.to, b: u, edgeIdx: link.edgeIdx }; }
+      }
+      if (fwd) topF = pick(gF, doneF, 1); else topB = pick(gB, doneB, -1);
+    }
+    return buildBidirResult(startId, endId, parentF, parentB, bridge, trace);
   }
 
   function runBFS(startId, endId) {
@@ -172,11 +247,11 @@ export function createAlgorithms(graph) {
   }
 
   const ALGS = {
-    bfs: { fn: runBFS, label: 'BFS', color: '--alg-bfs', desc: 'Explores outward in equal steps, ignoring speed limits — finds the route with the fewest towns, not the fastest one.' },
+    bfs: { fn: (a, b) => settings.bidirectional ? runBiBFS(a, b) : runBFS(a, b), bidir: true, label: 'BFS', color: '--alg-bfs', desc: 'Explores outward in equal steps, ignoring speed limits — finds the route with the fewest towns, not the fastest one.' },
     dfs: { fn: runDFS, label: 'DFS', color: '--alg-dfs', desc: 'Commits to one direction and only backtracks at dead ends — gets you there, but rarely by a sensible way.' },
     ids: { fn: runIDS, label: 'IDS', color: '--alg-ids', desc: 'DFS re-run from scratch with the depth limit raised by one each pass — finds the same fewest-towns route as BFS, using barely any memory.' },
-    dijkstra: { fn: runDijkstra, label: 'Dijkstra', color: '--alg-dijkstra', desc: 'Always finds the fastest route by travel time, expanding the whole map evenly outward from the start.' },
-    astar: { fn: runAStar, label: 'A*', color: '--alg-astar', desc: 'Same optimal answer as Dijkstra, but a straight-line estimate to the destination steers the search there faster.' },
+    dijkstra: { fn: (a, b) => settings.bidirectional ? runBiBest(a, b, false) : runDijkstra(a, b), bidir: true, label: 'Dijkstra', color: '--alg-dijkstra', desc: 'Always finds the fastest route by travel time, expanding the whole map evenly outward from the start.' },
+    astar: { fn: (a, b) => settings.bidirectional ? runBiBest(a, b, true) : runAStar(a, b), bidir: true, label: 'A*', color: '--alg-astar', desc: 'Same optimal answer as Dijkstra, but a straight-line estimate to the destination steers the search there faster.' },
     wave: { fn: runWave, label: 'Wave', color: '--alg-wave', desc: 'Floods outward from the start along every road at once, at the same speed everywhere — the first wave to reach the destination has found the shortest route by distance, though not always the fastest.' },
     ida: { fn: runIDAStar, label: 'IDA*', color: '--alg-ida', desc: 'A* logic run as repeated shallow dives with a rising cutoff — slower to watch, but barely any memory needed.' },
   };

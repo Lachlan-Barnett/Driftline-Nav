@@ -354,3 +354,26 @@ test('labels stay drawn at maximum zoom', () => withApp({}, app => {
   app.draw.texts.length = 0; app.advance(50);
   assert.ok(app.draw.texts.length > 3, 'labels should still be drawn at max zoom');
 }));
+
+test('bidirectional search: same routes as one-way, explores from both ends, checkbox toggles it', () => withApp({}, app => {
+  const g = app.dbg.graph, { ALGS } = app.dbg;
+  const pairs = [['Brisbane', 'Cairns'], ['Toowoomba', 'Roma'], ['Gympie', 'Mackay'], ['Townsville', 'Brisbane']];
+  for (const alg of ['bfs', 'dijkstra', 'astar']) {
+    for (const [a, b] of pairs) {
+      const s = g.NID[a], t = g.NID[b];
+      app.dbg.settings.bidirectional = false; const one = ALGS[alg].fn(s, t);
+      app.dbg.settings.bidirectional = true; const two = ALGS[alg].fn(s, t);
+      assert.ok(one && two, alg + ' ' + a + '-' + b);
+      // a connected path from start to end
+      assert.equal(two.path[0].from, s); assert.equal(two.path[two.path.length - 1].to, t);
+      two.path.forEach((seg, i) => { if (i) assert.equal(seg.from, two.path[i - 1].to); });
+      if (alg === 'bfs') assert.equal(two.path.length, one.path.length, 'bfs: same number of towns');
+      else assert.ok(Math.abs(two.totalSec - one.totalSec) < 0.01, `${alg} ${a}-${b}: ${two.totalSec} vs ${one.totalSec}`);
+      assert.ok(two.trace.some(x => x.expand === t) || two.trace.some(x => x.expand === s));
+    }
+  }
+  app.dbg.settings.bidirectional = false;
+  app.dbg.setSetting('bidirectional', true);
+  assert.equal(JSON.parse(app.store['driftline_qld_prefs']).settings.bidirectional, true);
+  assert.ok(app.dbg.state);
+}));
